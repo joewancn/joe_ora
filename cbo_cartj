@@ -86,6 +86,50 @@ SELECT b.agmt_id,
     执行计划中进行笛卡尔关联的表就是b和r，在SQL语句中b和r没有直接关联条件。
 
 
+如果两个表有直接关联条件，无法控制两个表进行笛卡尔连接。
+    如果两个表没有直接关联条件，在编写SQL的时候将两个表依次放在from后面，并且添加HINT：ordered，就可以使两个表进行笛卡尔积关联：
 
+SQL> select /*+ ordered */
+  2   a.ename, a.sal, a.deptno, b.dname, c.grade
+  3    from dept b, salgrade c, emp a
+  4   where a.deptno = b.deptno
+  5     and a.sal between c.losal and c.hisal;
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2197699399
+
+----------------------------------------------------------------------------------
+| Id  | Operation             | Name     | Rows  | Bytes | Cost (%CPU)| Time     |
+----------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT      |          |     1 |    65 |    12   (9)| 00:00:01 |
+|*  1 |  HASH JOIN            |          |     1 |    65 |    12   (9)| 00:00:01 |
+|   2 |   MERGE JOIN CARTESIAN|          |    20 |  1040 |     8   (0)| 00:00:01 |
+|   3 |    TABLE ACCESS FULL  | DEPT     |     4 |    52 |     3   (0)| 00:00:01 |
+|   4 |    BUFFER SORT        |          |     5 |   195 |     5   (0)| 00:00:01 |
+|   5 |     TABLE ACCESS FULL | SALGRADE |     5 |   195 |     1   (0)| 00:00:01 |
+|   6 |   TABLE ACCESS FULL   | EMP      |    14 |   182 |     3   (0)| 00:00:01 |
+----------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("A"."DEPTNO"="B"."DEPTNO")
+       filter("A"."SAL">="C"."LOSAL" AND "A"."SAL"<="C"."HISAL")
+
+    在SQL语句中，dept与salgrade没有直接关联条件，HINT：ordered表示根据SQL语句中from后面的表的顺序依次关联，因为dept与salgrade没有直接关联条件，并且SQL语句中添加了HINT：ordered，并且SQL语句中两个表是依次放在from后面的，所以dept与salgrade只能进行笛卡尔连接
+    
+    
+    
+        思考：当执行计划中有笛卡尔连接应该怎么优化呢？
+
+    首先应该检查表是否有关联条件，如果表没有关联条件，那么应该询问开发与业务人员为何表没有关联条件，是否为满足业务需求而故意不写关联条件。
+    其次应该检查离笛卡尔连接最近的表是否真的返回1行数据，如果返回行数真的就只有一行，那么走笛卡尔连接是没有问题的，如果返回行数超过1行，那就需要检查为什么Rows会估算错误，并且要纠正错误的Rows。纠正错误的Rows之后，优化器就不会走笛卡尔连接了。
+    可以使用HINT /*+ opt_param('_optimizer_mjc_enabled', 'false') */ 禁止笛卡尔连接。
+    
+    
 
 
