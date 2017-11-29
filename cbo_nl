@@ -1,0 +1,177 @@
+嵌套循环的算法：驱动表返回一行数据，通过连接列传值给被驱动表，驱动表返回多少行，被驱动表就要被扫描多少次。
+
+ 嵌套循环可以快速返回两表关联的前几条数据，如果SQL中添加了HINT：FIRST_ROWS，在两表关联的时候，优化器更倾向于嵌套循环
+ 
+ 嵌套循环驱动表应该返回少量数据。如果驱动表返回了100万行，那么被驱动表就会被扫描100万次。这个时候SQL会执行很久，并且被驱动表会被误认为热点表。被驱动表连接列的索引也会被误认为热点索引。
+ 
+ 嵌套循环被驱动表必须走索引。如果嵌套循环被驱动表的连接列没包含在索引中，那么被驱动表就只能走全表扫描，而且是反复多次全表扫描。当被驱动表很大的时候，SQL就跑不出结果。
+ 
+ >>>>嵌套循环被驱动表走索引只能走index unique scan或者index range scan
+ 
+ >>>>嵌套循环被驱动表不能走table access full，不能走index full scan，不能走index skip scan，也不能走index fast full scan。
+ 
+ 
+ 嵌套循环被驱动表的连接列的基数应该很高。如果被驱动表连接列的基数很低，那么被驱动表就不应该走索引，这样一来被驱动表就只能进行全表扫描了，但是被驱动表也不能走全表扫描。
+ 
+ 两表关联返回少量数据才能走嵌套循环。上文提到，嵌套循环被驱动表必须走索引，如果两表关联，返回100万行数据，那么被驱动表走索引就会产生100w次回表。回表一般是单块读，这个时候SQL性能极差，所以两表关联返回少量数据才能走嵌套循环。
+ 
+ 
+ 在测试账号scott中，运行如下SQL：
+
+SQL&get; select /*+ gather_plan_statistics use_nl(e,d) leading(e) */
+  2   e.ename, e.job, d.dname
+  3    from emp e, dept d
+  4   where e.deptno = d.deptno;
+......省略输出结果......
+     
+    运行下面命令获取带有A-TIME的执行计划：
+
+SQL&get; select * from table(dbms_xplan.display_cursor(null,null,'ALLSTATS LAST'));
+
+PLAN_TABLE_OUTPUT
+-------------------------------------------------------------------------------------------------
+SQL_ID  g374au8y24mw5, child number 0
+-------------------------------------
+select /*+ gather_plan_statistics use_nl(e,d) leading(e) */  e.ename,
+e.job, d.dname   from emp e, dept d  where e.deptno = d.deptno
+
+Plan hash value: 3625962092
+
+-------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name    | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+-------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |         |      1 |        |     14 |00:00:00.01 |      26 |
+|   1 |  NESTED LOOPS                |         |      1 |        |     14 |00:00:00.01 |      26 |
+|   2 |   NESTED LOOPS               |         |      1 |     15 |     14 |00:00:00.01 |      12 |
+|   3 |    TABLE ACCESS FULL         | EMP     |      1 |     15 |     14 |00:00:00.01 |       8 |
+|*  4 |    INDEX UNIQUE SCAN         | PK_DEPT |     14 |      1 |     14 |00:00:00.01 |       4 |
+|   5 |   TABLE ACCESS BY INDEX ROWID| DEPT    |     14 |      1 |     14 |00:00:00.01 |      14 |
+-------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+4 - access("E"."DEPTNO"="D"."DEPTNO")
+在执行计划中，离NESTED LOOPS关键字最近的表就是驱动表。这里EMP就是驱动表，DEPT就是被驱动表。
+    驱动表EMP扫描了一次(Id=3，Starts=1)，返回了14行数据(Id=3,A-Row)，传值14次给被驱动表(Id=4)，被驱动表扫描了14次(Id=4,Id=5,Starts=14)。
+	
+	
+	  下面是嵌套循环的PLSQL代码实现：
+
+declare
+  cursor cur_emp is
+    select ename, job, deptno from emp;
+  v_dname dept.dname%type;
+begin
+  for x in cur_emp loop
+    select dname into v_dname from dept where deptno = x.deptno;
+    dbms_output.put_line(x.ename || ' ' || x.job || ' ' || v_dname);
+  end loop;
+end;
+
+    游标cur_emp就相当于驱动表EMP，扫描了一次，一共返回了14条记录。该游标循环了14次，每次循环的时候传值给dept，dept被扫描了14次。
+	
+	因此，顺带提醒各位读者，在编写PLSQL 的时候，尽量避免游标循环里面套用SQL，因为那是纯天然的嵌套循环。假如游标返回100万行数据，游标里面的SQL会被执行100万次。同样的道理，游标里面尽量不要再套游标，如果外层游标循环1万次，内层游标循环1万次，那么最里面的SQL将被执行1亿次。
+	
+	
+	当两表使用外连接进行关联，如果执行计划走的是走嵌套循环，那么这时无法更改驱动表，驱动表会被固定为主表。例如下面SQL：
+
+SQL&get; explain plan for select /*+ use_nl(d,e) leading(e)  */
+  2   *
+  3    from dept d
+  4    left join emp e on d.deptno = e.deptno;
+
+Explained.
+
+SQL&get; select * from table(dbms_xplan.display);
+
+PLAN_TABLE_OUTPUT
+---------------------------------------------------------------------------
+Plan hash value: 2022884187
+
+---------------------------------------------------------------------------
+| Id  | Operation          | Name | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |      |    14 |   812 |     8   (0)| 00:00:01 |
+|   1 |  NESTED LOOPS OUTER|      |    14 |   812 |     8   (0)| 00:00:01 |
+|   2 |   TABLE ACCESS FULL| DEPT |     4 |    80 |     3   (0)| 00:00:01 |
+|*  3 |   TABLE ACCESS FULL| EMP  |     4 |   152 |     1   (0)| 00:00:01 |
+---------------------------------------------------------------------------
+
+   3 - filter("D"."DEPTNO"="E"."DEPTNO"(+))
+
+15 rows selected.
+
+    use_nl(d,e) 表示让两表走嵌套循环，在书写hint的时候，如果表有别名，hint中一定要使用别名，否则hint不生效，如果表没有别名，hint中就直接使用表名。
+    leading(e) 表示让emp表作为驱动表。
+    从执行计划中可以看到，dept与emp是采用嵌套循环进行连接的，这说明use_nl(d,e)生效了。执行计划中，驱动表为dept，虽然设置了leading(e)，但是没有生效。
+    为什么leading(e)没有生效呢？因为dept与emp是外连接，dept是主表，emp是从表，外连接走嵌套循环的时候驱动表只能是主表，所以leading(e)没有生效。
+    为什么两表关联是外连接的时候，走嵌套循环无法更改驱动表呢？因为嵌套循环需要传值，主表传值给从表之后，如果发现从表没有关联上，直接显示为NULL即可，但是如果是从表传值给主表，没关联上的数据怎么传值给主表呢？总不可能传NULL给主表吧，所以两表关联是外连接的时候，走嵌套循环驱动表只能固定为主表。
+	
+	
+	需要注意的是：如果外连接中从表有过滤条件，那么此时外连接会变为内连接。例如下面SQL：
+
+SQL&get; select /*+ leading(e) use_nl(d,e) */ *
+  2    from dept d
+  3    left join emp e on d.deptno = e.deptno
+  4   where e.sal < 3000;
+
+11 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 351108634
+
+---------------------------------------------------------------------------------------
+| Id  | Operation                    | Name    | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |         |    12 |   696 |    15   (0)| 00:00:01 |
+|   1 |  NESTED LOOPS                |         |    12 |   696 |    15   (0)| 00:00:01 |
+|*  2 |   TABLE ACCESS FULL          | EMP     |    12 |   456 |     3   (0)| 00:00:01 |
+|   3 |   TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    20 |     1   (0)| 00:00:01 |
+|*  4 |    INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+---------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - filter("E"."SAL"<3000)
+   4 - access("D"."DEPTNO"="E"."DEPTNO")
+
+    Hint指定了让从表EMP作为嵌套循环驱动表，从执行计划中看到，EMP确实是作为了嵌套循环的驱动表，并且执行计划中没有了OUTER关键字，这说明SQL已经变为内连接。
+	
+	
+	外连接  执行计划 有个 outer关键字 
+内连接 的 执行计划 没有 outer 关键字 
+
+    为什么外连接的从表有过滤条件会变成内连接呢？因为外连接的从表有过滤条件已经排除了从表与主表没有关联上显示为NULL的情况，所以外连接的从表有过滤条件会变为内连接。 
+
+思考： 两表关联走不走NL是看两个表关联之后返回的数据量多少?还是看驱动表返回的数据量多少？
+
+如果两个表是1：N关系，驱动表为1，被驱动表为N并且N很大，这时即使驱动表返回数据量很少，也不能走嵌套循环，因为两表关联之后返回的数据量会很多。因此判断两表关联是否应该走NL应该直接查看两表关联之后返回的数据量，如果两表关联之后返回的数据量少，可以走NL，返回的数据量多，应该走哈希连接。
+
+被驱动表 连接列 基数 
+
+
+
+思考：大表是否可以当嵌套循环(NL)驱动表?
+ 可以，如果大表过滤之后返回的数据量很少就可以当NL驱动表。
+ 思考：select * from a,b where a.id=b.id;  如果a有100条数据，b有100w行数据，a与b是1:N关系，N很低，应该怎么优化SQL?
+ 
+ 
+  因为a与b是1:N关系，N很低，可以在b的连接列(id)上创建索引，让a与b走嵌套循环(a nl b)，这样b表会被扫描100次，但是每次被扫描的时候走的是id列的索引范围扫描。如果让a和b进行HASH连接，b表会被全表扫描(因为没有过滤条件)，需要查询表中100w行数据，而如果让a和b进行嵌套循环，b表只需要查询出表中最多几百行数据(100*N)。一般情况下，一个小表与一个大表关联，可以考虑让小表 NL 大表，大表走连接列索引(如果大表有过滤条件，需要将过滤条件与连接列组合起来创建组合索引)，从而避免大表被全表扫描。
+  
+  最后，为了让各位读者能够加深对嵌套循环的理解，各位读者可以在SQLPLUS中依次运行下面脚本，观察SQL执行速度，思考SQL为什么会执行缓慢：
+
+create table a as select * from dba_objects;
+create table b as select * from dba_objects;
+set timi on
+set lines 200 pages 100
+set autot trace
+select /*+ use_nl(a,b) */ * from a,b where a.object_id=b.object_id;
+
+1:1关系，解决方法，如果给任表嘉一个索引，就可以出结果！
+《被驱动表走索引》
+
+
