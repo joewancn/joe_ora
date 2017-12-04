@@ -5,9 +5,16 @@
 
 2.1概述可用的备份： 
 rman>List backup summary; 
+第一列 B 表示backup
+第二列 A 表示Archivelog、 F 表示full backup、 0,1,2 表示incremental level备份
+第三列 A 表示可用AVALIABLE、 X 表示EXPIRED
+
 
 2.2按备份类型列出备份 
 rman>List backup by file; 
+分别为：数据文件列表、归档日志列表、控制文件列表、SPFILE列表
+
+
 
 2.3其他备份信息 
 rman>List backup; 
@@ -49,13 +56,17 @@ rman>list copy of controlfile;
 rman>report need backup days = 3; 
 根据需要应用的增量备份数生成报告，如： 
 rman>report need backup incremental = 3; 
+
 2． 报告备份冗余或恢复窗口 
 rman>report need backup redundancy = 2; 
 rman>report need backup recovery window of 2 days; 
+
 3． 报告数据文件的不可恢复操作 
 rman>report unrecoveable; 
+
 4． 报告数据库模式 
 模式指的是数据库的物理结构。模式包括数据文件名、数据文件号、为这些数据文件指派的表空间、数据文件大小、以及数据文件是否含有回滚段。 
 rman>report schema; 
+
 5． 报告丢弃的备份 
 如备份时使用了保存策略，备份有可能会被标记为丢弃状态（OBSOLETE）。此时执行report obsolete就可查看到丢弃的备份记录 
