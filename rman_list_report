@@ -1,0 +1,58 @@
+一：list——RMAN的list命令是一种在数据库控制文件或恢复目录中查询备份的历史信息的方法
+
+2.1概述可用的备份： 
+rman>List backup summary; 
+
+2.2按备份类型列出备份 
+rman>List backup by file; 
+
+2.3其他备份信息 
+rman>List backup; 
+
+2.4列出适合恢复的备份 
+rman>List recoverable backup of database; 
+
+2.5列出到期的备份信息 
+rman>List expired backup; 
+list expired backup of datafile 3或list expired backup of archivelog all,可获得到期的归档日志备份和控制文件/服务参数文件自动备份列表。
+
+2.6按表空间名和数据文件号列出备份 
+rman>list backup of tablespace users; 
+rman>list backup of datafile 3; 
+
+2.7列出归档日志备份 
+rman>list archivelog all; 
+用list backup of archivelog all命令可查看更详细的归档日志备份。 
+
+2.8   列出控制文件和服务器参数文件备份 
+rman>list backup of controlfile; 
+
+2.9列出数据文件副本 
+rman>list copy of database; 
+查看是否存在表空间和数据文件的数据文件副本用：list copy of tablespace users; 
+
+3.0列出归档的重做日志 
+rman>list copy of archivelog all; 
+也可以按照时间、序列或数据库scn列出特定的归档的重做日志副本。如： 
+rman>list copy of archivelog from sequence 35; 
+rman>list copy of archivelog from sequence 33 until sequence 35; 
+
+3.1列出控制文件副本 
+rman>list copy of controlfile; 
+
+二.report——RMAN的report命令用于判断数据库的当前可恢复状态和提供数据库备份的特定信息。 
+1． 报告最近没有被备份的数据文件 
+查看最近3天没有备份过的表空间，如： 
+rman>report need backup days = 3; 
+根据需要应用的增量备份数生成报告，如： 
+rman>report need backup incremental = 3; 
+2． 报告备份冗余或恢复窗口 
+rman>report need backup redundancy = 2; 
+rman>report need backup recovery window of 2 days; 
+3． 报告数据文件的不可恢复操作 
+rman>report unrecoveable; 
+4． 报告数据库模式 
+模式指的是数据库的物理结构。模式包括数据文件名、数据文件号、为这些数据文件指派的表空间、数据文件大小、以及数据文件是否含有回滚段。 
+rman>report schema; 
+5． 报告丢弃的备份 
+如备份时使用了保存策略，备份有可能会被标记为丢弃状态（OBSOLETE）。此时执行report obsolete就可查看到丢弃的备份记录 
