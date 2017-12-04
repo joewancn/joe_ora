@@ -1,0 +1,86 @@
+段时间一个亿级分区表，被分割成历史表和业务表，历史表中保留15天以外的数据，每天都会从业务表中的15天外的数据copy到历史表，并删除业务表15天外的数据，逻辑也很简单，但插入历史表的where 条件写的不是对，导致数据没插入，每天还从业务表中删除了。总之丢失了10天的业务历史数据，不巧的是客户突然要历史数据，呵呵。。祸不单行；
+好了废话不多说，切入正题，rac 使用NBU netbackup 对数据库备份的，周日全备周一到周六增量
+
+源主机HostA，目标主机HostB，NBUMaster主机nbuserver，Oracle_sid均为test，Oracle用户均为oracle。 两台主机的操作系统、数据库版本、NBU软件版本一致。
+1、增加nbuserver主机上文件
+新建一个空文件，取消nbu的异机恢复限制
+[nbuserver:root]# touch /usr/openv/netbackup/db/altnames/No.Restrictions
+ 
+2、编辑完后需要重启netbackup
+[nbuserver:root]# /usr/openv/netbackup/bin/bp.kill_all
+[nbuserver:root]# /usr/openv/netbackup/bin/bp.start_all
+ 
+下面开始恢复步骤（均为oracle用户操作）
+3、copy spfile
+在HostA上test数据库的pfile（create pfile from spfile）copy至HostB中的$ORACLE_HOME/dbs目录下，因为源库是rac 节点，所以pfile copy到目标主机后还需要修改一下参数配置，把集群相关的配置删除
+[HostA:ora]# ll $ORACLE_HOME/dbs/inittest.ora
+ 
+4、HostB上，密码文件、相应的dump目录
+  [HostB:ora]#orapwd file=<fname> password=<password>entries=<users>
+  [HostB:ora]#mkdir $admin/test/*dump
+ 
+5、启动数据库至nomount
+[HostB:ora]# sqlplus '/as sysdba'
+SQL> startup nomount
+ 
+6、进行rman恢复
+[HostB:ora]# rman target /
+ 
+7、set dbid（HostA上test库的dbid）
+RMAN> set dbid=1203153859
+executing command: SET DBID
+database name is "TEST" and DBID is 2091611406
+ 
+查看HostA上的dbid
+SQL> select dbid from v$database;
+ 
+ 
+8、恢复control file
+[HostB:ora]# /usr/openv/netbackup/bin/bplist -S 'nbuserver' -C 'HostA' -t 4 -R -l /
+#查看nbuserver上的备份列表
+ 查找周日的全备的控制文件
+RMAN>RUN {
+2> allocate channel D1 type 'sbt_tape' parms 'SBT_LIBRARY=/usr/openv/netbackup/bin/libobk.so64';
+3> send 'NB_ORA_SERV=nbuserver,NB_ORA_CLIENT=HostA';
+4> RESTORE CONTROLFILE FROM 'cntrl_39324_1_784448328';
+5> RELEASE CHANNEL D1;
+6> }
+
+ 
+9、控制文件修复成功，将库alter至mount状态
+SQL> alter database mount;
+database mounted
+ 
+10、恢复数据库
+RMAN> run {
+2> allocate channel D1 type 'sbt_tape' parms 'SBT_LIBRARY=/usr/openv/netbackup/bin/libobk.so64';
+3> send 'NB_ORA_SERV=nbuserver,NB_ORA_CLIENT=HostA';
+4> set until time '2017-07-01 00:00:00';
+5> restore database;
+6> recover database;
+7> RELEASE CHANNEL D1;
+8> }
+11、恢复归档日志
+sql>select file#,checkpoint_change# from v$datafile;
+sql>select file#,checkpoint_change# from v$datafile_header;
+sql>select checkpoint_change# from v$database;
+查看当前文件的snc和系统snc不一致，需要日志文件恢复
+
+sql>recover database using backup controlfile until time '2017-07-01 00:00:00';
+会提示需要的日志
+
+rman>RUN {
+1>allocate channel D1 type 'sbt_tape' parms 'SBT_LIBRARY=/usr/openv/netbackup/bin/libobk.so64';
+2>send 'NB_ORA_SERV=hb-manage-backup,NB_ORA_CLIENT=proddb-2';
+3>restore archivelog from logseq 55459 thread 1;
+4>RELEASE CHANNEL D1;
+5>}
+根据需要的日志点提示，再从NBU上恢复归档日志文件
+
+恢复成功后继续介质恢复
+sql>recover database using backup controlfile until time '2017-07-01 00:00:00';
+
+会提示需要的归档日志  auto 就行
+
+12、打开数据库
+SQL> alterdatabase open resetlogs;
