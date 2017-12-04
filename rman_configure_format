@@ -1,0 +1,32 @@
+
+查询RMAN设置中非默认值:
+    SQL> select name,value from v$rman_configuration;
+
+configure:
+
+保存策略 (retention policy)
+   configure retention policy to recovery window of 7 days;
+   configure retention policy to redundancy 5;
+   configure retention policy clear;
+CONFIGURE RETENTION POLICY TO NONE;
+第一种recover window是保持所有足够的备份，可以将数据库系统恢复到最近七天内的任意时刻。任何超过最近七天的数据库备份将被标记为obsolete。
+第二种redundancy 是为了保持可以恢复的最新的5份数据库备份，任何超过最新5份的备份都将被标记为redundancy。它的默认值是1份。（默认）
+第三种：NONE 可以把使备份保持策略失效，Clear 将恢复默认的保持策略
+
+
+Rman的format格式中的%
+%c 备份片的拷贝数 
+%d 数据库名称 
+%D 位于该月中的第几天 (DD) 
+%M 位于该年中的第几月 (MM) 
+%F 一个基于DBID唯一的名称,这个格式的形式为c-IIIIIIIIII-YYYYMMDD-QQ,其中IIIIIIIIII为该数据库的DBID，YYYYMMDD为
+日期，QQ是一个1-256的序列 
+%n 数据库名称，向右填补到最大八个字符 
+%u 一个八个字符的名称代表备份集与创建时间 
+%p 该备份集中的备份片号，从1开始到创建的文件数
+%U 一个唯一的文件名，代表%u_%p_%c 
+%s 备份集的号 
+%t 备份集时间戳 
+%T 年月日格式(YYYYMMDD)
+
+
