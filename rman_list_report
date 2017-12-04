@@ -1,5 +1,8 @@
 一：list——RMAN的list命令是一种在数据库控制文件或恢复目录中查询备份的历史信息的方法
 
+ ☆★RMAN> list incarnation;
+  汇总查询：--如果备份文件多的话多用这两个list命令可以对备份文件有个总体了解。
+
 2.1概述可用的备份： 
 rman>List backup summary; 
 
