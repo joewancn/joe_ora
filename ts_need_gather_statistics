@@ -14,3 +14,13 @@ WHERE   SSI.rowmodctr > 0
         AND STATS_DATE(SI.object_id, SI.index_id) IS NOT NULL  
         AND SO.type = 'U'  
 ORDER BY RowModCTR DESC;
+
+
+
+select owner, table_name name, object_type, stale_stats, last_analyzed
+  from dba_tab_statistics
+ where table_name in (table_name)
+   and owner = 'SCOTT'
+   and (stale_stats = 'YES' or last_analyzed is null); 
+
+-- 查到的结果空表示未收集过统计信息，出现 YES才是统计信息过期。
