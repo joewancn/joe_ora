@@ -6,6 +6,8 @@
 
 如果发生了视图合并，那么视图/子查询就会被拆开，并且执行计划中视图/子查询部分就没有VIEW关键字。
 
+视图合并(View Merge)的有可能好有可能坏。
+
 
 
     现有如下SQL及其执行计划(Oracle11.2.0.1 
@@ -155,6 +157,9 @@ select a.*, c.grade
           where a.deptno = b.deptno and rownum>0) a,
         salgrade c
   where a.sal between c.losal and c.hisal;
+##当子查询中有rownum ,union , start with... cube ，就会当作一个整体。
+
+
 
 
 
