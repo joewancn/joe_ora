@@ -1,0 +1,111 @@
+抓出可以创建组合索引的SQL(回表再过滤选择性高的列)
+ 此脚本依赖统计信息。
+    笔者在第一章中讲到，回表次数太多会严重影响SQL性能。
+	当执行计划中发生了回表再过滤，并且过滤字段的选择性比较高，这时可以将过滤字段包含在索引中避免回表再过滤，从而减少回表次数，提升查询性能。
+	下面脚本抓出回表再过滤选择性较高的列：
+	select a.sql_id,
+       a.sql_text,
+       f.table_name,
+       c.size_mb,
+       e.column_name,
+       round(e.num_distinct / f.num_rows * 100, 2) selectivity
+  from v$sql a,
+       v$sql_plan b,
+       (select owner, segment_name, sum(bytes / 1024 / 1024) size_mb
+          from dba_segments
+         group by owner, segment_name) c,
+       dba_tab_col_statistics e,
+       dba_tables f
+ where a.sql_id = b.sql_id
+   and a.child_number = b.child_number
+   and b.object_owner = c.owner
+   and b.object_name = c.segment_name
+   and e.owner = f.owner
+   and e.table_name = f.table_name
+   and b.object_owner = f.owner
+   and b.object_name = f.table_name
+   and instr(b.filter_predicates, e.column_name) > 0
+   and (e.num_distinct / f.num_rows) > 0.1
+   and c.owner = 'SCOTT'
+   and b.operation = 'TABLE ACCESS'
+   and b.options = 'BY INDEX ROWID'
+   and e.owner = 'SCOTT'
+ order by 4 desc;
+
+
+SQL> select * from t2 where object_id<1000 and object_name like 'T%';
+
+26 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 921640168
+
+---------------------------------------------------------------------------------------
+| Id  | Operation                   | Name      | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT            |           |    12 |  1164 |    19   (0)| 00:00:01 |
+|*  1 |  TABLE ACCESS BY INDEX ROWID| T2        |    12 |  1164 |    19   (0)| 00:00:01 |
+|*  2 |   INDEX RANGE SCAN          | IDX_T2_ID |   917 |       |     4   (0)| 00:00:01 |
+---------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter("OBJECT_NAME" LIKE 'T%')
+   2 - access("OBJECT_ID"<1000)
+
+
+Statistics
+----------------------------------------------------------
+          1  recursive calls
+          0  db block gets
+         19  consistent gets
+          0  physical reads
+          0  redo size
+       2479  bytes sent via SQL*Net to client
+        430  bytes received via SQL*Net from client
+          3  SQL*Net roundtrips to/from client
+          0  sorts (memory)
+          0  sorts (disk)
+         26  rows processed
+
+结论：
+因此需要将 object_name,object_id创建一个组合索引。
+
+ 执行计划中发生了回表再过滤，过滤字段的选择性较高，利用脚本将上面SQL抓出：
+
+SQL> select a.sql_id,
+        a.sql_text,
+           f.table_name,
+           c.size_mb,
+           e.column_name,
+           round(e.num_distinct / f.num_rows * 100, 2) selectivity
+      from v$sql a,
+           v$sql_plan b,
+           (select owner, segment_name, sum(bytes / 1024 / 1024) size_mb
+             from dba_segments
+            group by owner, segment_name) c,
+          dba_tab_col_statistics e,
+          dba_tables f
+    where a.sql_id = b.sql_id
+      and a.child_number = b.child_number
+      and b.object_owner = c.owner
+      and b.object_name = c.segment_name
+      and e.owner = f.owner
+      and e.table_name = f.table_name
+      and b.object_owner = f.owner
+     and b.object_name = f.table_name
+     and instr(b.filter_predicates, e.column_name) > 0
+     and (e.num_distinct / f.num_rows) > 0.1
+     and c.owner = 'SYS'
+      and b.operation = 'TABLE ACCESS'
+      and b.options = 'BY INDEX ROWID'
+     and e.owner = 'SCOTT'
+    order by 4 desc;
+
+SQL_ID          SQL_TEXT                          TABLE_NAME SIZE_MB COLUMN_NAME SELECTIVITY
+--------------- --------------------------------  ---------- ------- ----------- ----------- 
+faqathsuy5w3d   select * from t2 where object_id  T2               9 OBJECT_NAME       60.94
+                <1000 and object_name like 'T%'
