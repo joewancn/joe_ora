@@ -1,0 +1,160 @@
+
+视图合并(View Merge)：当SQL语句中有内联视图(in-line view，from后面的子查询)，或者SQL语句中有用 create view创建的视图，CBO会尝试将内联视图/视图拆开，
+进行等价的改写，这个过程就叫做视图合并。
+
+如果没有发生视图合并，在执行计划中，我们可以看到VIEW关键字，并且视图/子查询会作为一个整体。
+
+如果发生了视图合并，那么视图/子查询就会被拆开，并且执行计划中视图/子查询部分就没有VIEW关键字。
+
+
+
+    现有如下SQL及其执行计划(Oracle11.2.0.1 
+
+):
+
+SQL> select a.*, c.grade
+  2    from (select ename, sal, a.deptno, b.dname
+  3            from emp a, dept b
+  4           where a.deptno = b.deptno) a,
+  5         salgrade c
+  6   where a.sal between c.losal and c.hisal;
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 3095952880
+
+------------------------------------------------------------------------------
+| Id  | Operation                    | Name     | Rows  | Bytes | Cost (%CPU)|
+------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |          |     1 |    65 |     9  (23)|
+|   1 |  NESTED LOOPS                |          |       |       |            |
+|   2 |   NESTED LOOPS               |          |     1 |    65 |     9  (23)|
+|   3 |    MERGE JOIN                |          |     1 |    52 |     8  (25)|
+|   4 |     SORT JOIN                |          |     5 |   195 |     4  (25)|
+|   5 |      TABLE ACCESS FULL       | SALGRADE |     5 |   195 |     3   (0)|
+|*  6 |     FILTER                   |          |       |       |            |
+|*  7 |      SORT JOIN               |          |    14 |   182 |     4  (25)|
+|   8 |       TABLE ACCESS FULL      | EMP      |    14 |   182 |     3   (0)|
+|*  9 |    INDEX UNIQUE SCAN         | PK_DEPT  |     1 |       |     0   (0)|
+|  10 |   TABLE ACCESS BY INDEX ROWID| DEPT     |     1 |    13 |     1   (0)|
+------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   6 - filter("SAL"<="C"."HISAL")
+   7 - access("SAL">="C"."LOSAL")
+       filter("SAL">="C"."LOSAL")
+   9 - access("A"."DEPTNO"="B"."DEPTNO")
+  SQL语句中有内联视图，但是执行计划中没有VIEW关键字，说明发生了视图合并。内联视图中emp表是与dept表关联的，但是执行计划中，emp表是与salgrade先关联的，
+  emp表与salgrade关联之后得到一个结果集再与dept表进行的关联，这说明发生了视图合并之后，有可能会打乱视图/子查询中表的原本的连接顺序。
+  
+  
+  现在添加hint no_merge(子查询别名/视图别名)禁止视图合并，再看执行计划：
+
+SQL> select /*+ no_merge(a) */
+  2   a.*, c.grade
+  3    from (select ename, sal, a.deptno, b.dname
+  4            from emp a, dept b
+  5           where a.deptno = b.deptno) a,
+  6         salgrade c
+  7   where a.sal between c.losal and c.hisal;
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 4110645763
+
+----------------------------------------------------------------------------------
+| Id  | Operation                        | Name     | Rows  | Bytes | Cost (%CPU)|
+----------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                 |          |     1 |    81 |    11  (28)|
+|   1 |  MERGE JOIN                      |          |     1 |    81 |    11  (28)|
+|   2 |   SORT JOIN                      |          |     5 |   195 |     4  (25)|
+|   3 |    TABLE ACCESS FULL             | SALGRADE |     5 |   195 |     3   (0)|
+|*  4 |   FILTER                         |          |       |       |            |
+|*  5 |    SORT JOIN                     |          |    14 |   588 |     7  (29)|
+|   6 |     VIEW                         |          |    14 |   588 |     6  (17)|
+|   7 |      MERGE JOIN                  |          |    14 |   364 |     6  (17)|
+|   8 |       TABLE ACCESS BY INDEX ROWID| DEPT     |     4 |    52 |     2   (0)|
+|   9 |        INDEX FULL SCAN           | PK_DEPT  |     4 |       |     1   (0)|
+|* 10 |       SORT JOIN                  |          |    14 |   182 |     4  (25)|
+|  11 |        TABLE ACCESS FULL         | EMP      |    14 |   182 |     3   (0)|
+----------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - filter("A"."SAL"<="C"."HISAL")
+   5 - access("A"."SAL">="C"."LOSAL")
+       filter("A"."SAL">="C"."LOSAL")
+  10 - access("A"."DEPTNO"="B"."DEPTNO")
+       filter("A"."DEPTNO"="B"."DEPTNO")
+
+    执行计划中有VIEW关键字，并且emp是与dept进行关联的，这说明执行计划中没有发生视图合并。
+
+
+
+ 也可以直接在子查询里面添加HINT no_merge禁止视图合并：
+
+SQL> select a.*, c.grade
+  2    from (select /*+ no_merge */
+  3           ename, sal, a.deptno, b.dname
+  4            from emp a, dept b
+  5           where a.deptno = b.deptno) a,
+  6         salgrade c
+  7   where a.sal between c.losal and c.hisal;
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 4110645763
+
+----------------------------------------------------------------------------------
+| Id  | Operation                        | Name     | Rows  | Bytes | Cost (%CPU)|
+----------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                 |          |     1 |    81 |    11  (28)|
+|   1 |  MERGE JOIN                      |          |     1 |    81 |    11  (28)|
+|   2 |   SORT JOIN                      |          |     5 |   195 |     4  (25)|
+|   3 |    TABLE ACCESS FULL             | SALGRADE |     5 |   195 |     3   (0)|
+|*  4 |   FILTER                         |          |       |       |            |
+|*  5 |    SORT JOIN                     |          |    14 |   588 |     7  (29)|
+|   6 |     VIEW                         |          |    14 |   588 |     6  (17)|
+|   7 |      MERGE JOIN                  |          |    14 |   364 |     6  (17)|
+|   8 |       TABLE ACCESS BY INDEX ROWID| DEPT     |     4 |    52 |     2   (0)|
+|   9 |        INDEX FULL SCAN           | PK_DEPT  |     4 |       |     1   (0)|
+|* 10 |       SORT JOIN                  |          |    14 |   182 |     4  (25)|
+|  11 |        TABLE ACCESS FULL         | EMP      |    14 |   182 |     3   (0)|
+----------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - filter("A"."SAL"<="C"."HISAL")
+   5 - access("A"."SAL">="C"."LOSAL")
+       filter("A"."SAL">="C"."LOSAL")
+  10 - access("A"."DEPTNO"="B"."DEPTNO")
+       filter("A"."DEPTNO"="B"."DEPTNO")
+
+    当视图/子查询中有多个表关联，发生视图合并之后一般会将视图/子查询内部表关联顺序打乱。
+
+
+或者这样改也可以，再子查询中加入 rownum>0
+
+select a.*, c.grade
+   from (select 
+          ename, sal, a.deptno, b.dname
+           from emp a, dept b
+          where a.deptno = b.deptno and rownum>0) a,
+        salgrade c
+  where a.sal between c.losal and c.hisal;
+
+
+
