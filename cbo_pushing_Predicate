@@ -161,4 +161,60 @@ Predicate Information (identified by operation id):
   
     
     
+  一定要注意，当视图中有rownum会导致无法谓词推入，所以一般情况下，不建议在视图中使用rownum。为什么rownum会导致无法谓词推入呢？因为当谓词推入之后，rownum的值已经发生改变，这已经改变了SQL结果集了，任何查询变换必须是在不改变SQL结果集的前提下，才能进行查询变换。
+
+
+####################################################333
+
+1. 子查询非嵌套 - 针对 where 条件的半连接/反连接——exists / not exists(union/rownum/start with/cube)，目的干掉filter
+
+2. 视图合并 没有(union/rownum/start with/cube)，默认会合并，合并之后，执行顺序会被改变，导致sql跑得慢
+
+3. 谓词推入，重点高 视图当做 NL 被驱动表的情况，绝大部分是因为 驱动表 rows算错了。
+##################################################
+
+如下，如果 a 有几百万， b 只有 7w，那么这个执行计划就是错误的。
+SQL> select /*+ push_pred(b) */ *
+  2    from test a, v_pushpredicate b
+  3   where a.object_id = b.object_id
+  4     and a.owner = 'SCOTT';
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2131469559
+
+---------------------------------------------------------------------------------------
+| Id  | Operation                      | Name            | Rows  | Bytes | Cost (%CPU)|
+---------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |                 |  4997 |  1444K| 10073   (1)|
+|   1 |  NESTED LOOPS                  |                 |  4997 |  1444K| 10073   (1)|
+|   2 |   TABLE ACCESS BY INDEX ROWID  | TEST            |  2499 |   236K|    73   (0)|
+|*  3 |    INDEX RANGE SCAN            | IDX_OWNER       |  2499 |       |     6   (0)|
+|   4 |   VIEW                         | V_PUSHPREDICATE |     1 |   199 |     4   (0)|
+|   5 |    UNION ALL PUSHED PREDICATE  |                 |       |       |            |
+|   6 |     TABLE ACCESS BY INDEX ROWID| TEST            |     1 |    97 |     2   (0)|
+|*  7 |      INDEX RANGE SCAN          | IDX_ID          |     1 |       |     1   (0)|
+|   8 |     TABLE ACCESS BY INDEX ROWID| TEST            |     1 |    97 |     2   (0)|
+|*  9 |      INDEX RANGE SCAN          | IDX_ID          |     1 |       |     1   (0)|
+---------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("A"."OWNER"='SCOTT')
+   7 - access("OBJECT_ID"="A"."OBJECT_ID")
+   9 - access("OBJECT_ID"="A"."OBJECT_ID")
+
+
+
+
+
+
+
+
+
+
 
