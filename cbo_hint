@@ -1,0 +1,82 @@
+
+
+
+
+大小必须开并行
+
+/*+ opt_param('_optimizer_mjc_enabled','false') */  不走笛卡尔积 【走这种执行计划的，很有可能是统计信息不准确】
+
+/*+ opt_param('_push_join_predicate','false') */  不走谓词推入
+
+ /*+ parallel(f,8) parallel(t 8) use_hash(t,f) full(f) full(t)  PQ_DISTRIBUTE(t None, Broadcast) */ * 小表广播,t是驱动表（必须是小于100M左右的，大表会导致网络阻塞）
+--广播要关联parallel次
+
+ /*+ parallel(f,8) parallel(t 8) use_hash(t,f) full(f) full(t)  PQ_DISTRIBUTE(f HASH, HASH) */ * 小表广播,t是驱动表（必须是小于100M左右的，大表会导致网络阻塞）
+--hash需要关联 parallel*parallel次
+
+/*+ dynamic_sampling(t 6)*/ 动态采用统计信息
+
+
+ /*+  OPT_PARAM('_optimizer_mjc_enabled','false') */
+等价于 alter session set '_optimizer_mjc_enabled'=false; 
+
+
+HINT：NATIVE_FULL_OUTER_JOIN 具体用法有注意事项，具体见官方文档
+等价于 alter session set “_optimizer_native_full_outer_join” = force;
+
+
+1.hint规范
+有别名时，hint中只能用别名
+
+
+2.index_ffs(a 索引名字)、
+
+
+3.use_hash(a,b)、use_nl(a,b)、use_merge(a,b)
+a, b 可以是表 也可以是子查询 别名 ，还可以是视图名字 视图的别名
+use_merge(a,b)非等值连接时，走了NL，use_merge(a,b)他就会走hash，其他情况打死也不用；
+
+4. select * from a where a.id in (select id from b);怎么写hint，让他a nl b、b nl a 、a hash b、a filter b
+select /*+ use_nl(a,b@sb) leading(a) */ * from a where a.id in (select  /*+qb_name(sb) */  id from b);-强制a nl b
+select /*+ use_hash(a,b@sb) leading(b@sb) */ * from a where a.id in (select /*+qb_name(sb) */ id from b);--强制 a hash b
+select* from a where a.id in (select /*+ no_unnest */ id from b);-- a filter b
+
+
+5.当 in (是一个复杂的子查询了),qb_name就不生效了，为什么呢？
+ 一个 select 就是一个 qb_name  ，in 里面 复杂了 就是 n个 query block 了，这个时候 只能with ... as  me
+建议：in / exists 直接改成with as ，容易加hint
+
+ 6.当in （复杂了），且in返回很少数据，用 in反向驱动 a 
+select * from a where a.id in (select /*+ hash_sj */ id from b); -- 走hash semi join （hash半连接）
+select * from a where a.id in (select /*+ nl_sj */ id from b);-- 走nl semi join （nl半连接）
+
+@a  是 query block a  @a加到最外面的select里面
+ SELECT * FROM table(DBMS_XPLAN.DISPLAY(format=>'ADVANCED -PROJECTION'));  
+
+7. select * from a where a.id not in (select  id from b);
+绝对不可以 b nl a，只能 a hash b 或者 b hash a 或 a nl b
+select * from a where a.id not in (select /*+ hash_aj */ id from b);
+
+ 8. from （子查询）
+select * from () a,b where a.id=b.id;
+让a当成整理怎么搞？
+第一种方法：
+select /*+ no_merge(a) */ * from () a,b where a.id=b.id;-- 要a不展开
+第二种方法：
+select /*+ use_hash(a,b)*/ * from () a,b where a.id=b.id;
+第三种方法：
+alter session set "_simple_view_merging"=false;--用隐含参数控制
+
+  ALTER SESSION SET "_push_join_predicate" = false;  --禁止连接列的谓词推入
+/*+ OPT_PARAM('_OPTIMIZER_PUSH_PRED_COST_BASED','FALSE')*/--禁止group by的谓词推入
+ /*+ NO_QUERY_TRANSFORMATION */ --禁止任何CBO内部的SQL改写（查询转换）
+
+ /*+ opt_param(‘_simple_view_merging’,'false’)  */ --禁止试图合并 
+/*+ swap_join_inputs(表名/别名) */
+/*+ opt_param('_simple_view_merging','false')  */ 
+
+ /*+ cardinality(a 100) */ 指定表a返回的基数  --这里返回基数 是指a表返回的条数吗 
+
+no_unnest -- 强制走filter （适应场合—— in 、 not int 、 exists、 not exists ）
+
+
