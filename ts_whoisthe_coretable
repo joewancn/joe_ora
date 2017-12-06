@@ -1,0 +1,244 @@
+
+
+非分区索引在创建时会自动搜集索引统计信息，分区索引则不会。
+
+
+非分区搜集表的统计信息脚本
+BEGIN
+  DBMS_STATS.GATHER_TABLE_STATS(ownname          => 'SCOTT',
+                                tabname          => 'DEPT',
+                                estimate_percent => 30（Oracle默认、推荐）,  --采样率；小于1G 100%；1G --5G  30%；5G ---最好分区
+                                method_opt       => 'for all columns size repeat'（工作中用）,--按上一次搜集的方式进行搜集
+                                method_opt       => 'for all columns size skewonly',-- 对所有列收集直方图，除唯一列、基数=0的列（这个打死不要用，除非实验）
+                                method_opt       => 'for all columns size auto'（默认）,--对where列自动搜集直方图
+                                method_opt       => 'for columns owner size 200'，--对owner列搜集直方图，200代表200个桶，一个桶等于一个基数。
+                                                                                                                    当直方图是height balanced时，说明基数、选择性超过了10%，对于这中列其实没有必要进行搜集直方图
+                                method_opt =>'for columns owner,object_id size 200'--对owner,object_id列搜集直方图，200代表200个桶
+                                method_opt =>'for columns （owner,object_id size） 200'--对（owner,object_id）列搜集直方图，这个就是拓展统计信息；
+                                no_invalidate    => FALSE, --false--共享池游标立即失效; true--共享池游标不立即失效
+                                 degree           => 8,--并行度，
+                                                               开启并行的前提：
+                                                                  alter system set parallel_max_servers=cpu_count*2;
+                                                                  alter system set parallel_min_servers=cpu_count*2;
+                                cascade          => TRUE);--是否一并收集索引的统计信息
+END;
+/
+
+
+对分区表收集统计信息
+BEGIN
+  DBMS_STATS.GATHER_TABLE_STATS(ownname          => 'ROBINSON',
+                                tabname          => 'P_TEST',
+                                estimate_percent => 30,
+                                method_opt       => 'for all columns size repeat',
+                                no_invalidate    => FALSE,
+                                degree           => 8,
+                                granularity      => 'ALL',
+                                cascade          => TRUE);
+END;
+/
+
+
+--查询表的采样率
+SELECT owner,
+       table_name,
+       num_rows,
+       sample_size,--这个就是采样率，如果sample_size不是100，那么说明num_rows是假的
+       ceil(sample_size / num_rows * 100) estimate_percent 
+  FROM DBA_TAB_STATISTICS
+ WHERE owner='SCOTT' AND table_name='TEST'; 
+
+
+
+--监控where列
+begin
+  dbms_stats.flush_database_monitoring_info;
+end;
+select r.name            owner,
+       o.name            table_name,
+       c.name            column_name,
+       equality_preds, ---等值过滤
+       equijoin_preds, ---等值JOIN过滤 比如where a.id=b.id
+       nonequijoin_preds, ----不等JOIN过滤
+       range_preds, ----范围过滤 > >= < <= between and
+       like_preds, ----LIKE过滤
+       null_preds, ----NULL 过滤
+       timestamp
+  from sys.col_usage$ u, sys.obj$ o, sys.col$ c, sys.user$ r
+ where o.obj# = u.obj#
+   and c.obj# = u.obj#
+   and c.col# = u.intcol#
+   and r.name = 'SCOTT'
+   and o.name = 'TEST';
+
+
+--检查统计信息是否过期
+select owner, table_name name, object_type, stale_stats, last_analyzed
+  from dba_tab_statistics
+ where table_name in (table_name)
+   and owner = 'SCOTT'
+   and (stale_stats = 'YES' or last_analyzed is null);  -- 查到的行为空表示未收集过统计信息，出现YES才是统计信息过期。
+
+--检查统计信息过期的原因，同时也是监控DML操作的，也可以监控核心表，这里面的top 50（有大量delete或者update，说明此系统不行，因为数据最重要）
+select *
+  from (select *
+          from (select *
+                  from (select u.name owner,
+                               o.name table_name,
+                               null partition_name,
+                               null subpartition_name,
+                               m.inserts,
+                               m.updates,
+                               m.deletes,
+                               m.timestamp,
+                               decode(bitand(m.flags, 1), 1, 'YES', 'NO') truncated,
+                               m.drop_segments
+                          from sys.mon_mods_all$ m,
+                               sys.obj$          o,
+                               sys.tab$          t,
+                               sys.user$         u
+                         where o.obj# = m.obj#
+                           and o.obj# = t.obj#
+                           and o.owner# = u.user#
+                        union all
+                        select u.name,
+                               o.name,
+                               o.subname,
+                               null,
+                               m.inserts,
+                               m.updates,
+                               m.deletes,
+                               m.timestamp,
+                               decode(bitand(m.flags, 1), 1, 'YES', 'NO'),
+                               m.drop_segments
+                          from sys.mon_mods_all$ m, sys.obj$ o, sys.user$ u
+                         where o.owner# = u.user#
+                           and o.obj# = m.obj#
+                           and o.type# = 19
+                        union all
+                        select u.name,
+                               o.name,
+                               o2.subname,
+                               o.subname,
+                               m.inserts,
+                               m.updates,
+                               m.deletes,
+                               m.timestamp,
+                               decode(bitand(m.flags, 1), 1, 'YES', 'NO'),
+                               m.drop_segments
+                          from sys.mon_mods_all$ m,
+                               sys.obj$          o,
+                               sys.tabsubpart$   tsp,
+                               sys.obj$          o2,
+                               sys.user$         u
+                         where o.obj# = m.obj#
+                           and o.owner# = u.user#
+                           and o.obj# = tsp.obj#
+                           and o2.obj# = tsp.pobj#)
+                 where owner not like '%SYS%'
+                   and owner not like 'XDB'
+                union all
+                select *
+                  from (select u.name owner,
+                               o.name table_name,
+                               null partition_name,
+                               null subpartition_name,
+                               m.inserts,
+                               m.updates,
+                               m.deletes,
+                               m.timestamp,
+                               decode(bitand(m.flags, 1), 1, 'YES', 'NO') truncated,
+                               m.drop_segments
+                          from sys.mon_mods$ m,
+                               sys.obj$      o,
+                               sys.tab$      t,
+                               sys.user$     u
+                         where o.obj# = m.obj#
+                           and o.obj# = t.obj#
+                           and o.owner# = u.user#
+                        union all
+                        select u.name,
+                               o.name,
+                               o.subname,
+                               null,
+                               m.inserts,
+                               m.updates,
+                               m.deletes,
+                               m.timestamp,
+                               decode(bitand(m.flags, 1), 1, 'YES', 'NO'),
+                               m.drop_segments
+                          from sys.mon_mods$ m, sys.obj$ o, sys.user$ u
+                         where o.owner# = u.user#
+                           and o.obj# = m.obj#
+                           and o.type# = 19
+                        union all
+                        select u.name,
+                               o.name,
+                               o2.subname,
+                               o.subname,
+                               m.inserts,
+                               m.updates,
+                               m.deletes,
+                               m.timestamp,
+                               decode(bitand(m.flags, 1), 1, 'YES', 'NO'),
+                               m.drop_segments
+                          from sys.mon_mods$   m,
+                               sys.obj$        o,
+                               sys.tabsubpart$ tsp,
+                               sys.obj$        o2,
+                               sys.user$       u
+                         where o.obj# = m.obj#
+                           and o.owner# = u.user#
+                           and o.obj# = tsp.obj#
+                           and o2.obj# = tsp.pobj#)
+                 where owner not like '%SYS%'
+                   and owner not like '%XDB%')
+         order by inserts desc)
+ where rownum <= 50;
+
+--自动收集统计信息
+DECLARE
+  CURSOR STALE_TABLE IS
+    SELECT OWNER,
+           SEGMENT_NAME,
+           CASE
+             WHEN SIZE_GB < 0.5 THEN
+              30
+             WHEN SIZE_GB >= 0.5 AND SIZE_GB < 1 THEN
+              20
+             WHEN SIZE_GB >= 1 AND SIZE_GB < 5 THEN
+              10
+             WHEN SIZE_GB >= 5 AND SIZE_GB < 10 THEN
+              5
+             WHEN SIZE_GB >= 10 THEN
+              1
+           END AS PERCENT,
+           8 AS DEGREE
+      FROM (SELECT OWNER,
+                   SEGMENT_NAME,
+                   SUM(BYTES / 1024 / 1024 / 1024) SIZE_GB
+              FROM DBA_SEGMENTS
+             WHERE OWNER = 'ADWU_OPTIMA_AP11'
+               AND SEGMENT_NAME IN
+                   (SELECT /*+ UNNEST */ DISTINCT TABLE_NAME
+                      FROM DBA_TAB_STATISTICS
+                     WHERE (LAST_ANALYZED IS NULL OR STALE_STATS = 'YES')
+                       AND OWNER = 'ADWU_OPTIMA_AP11')
+             GROUP BY OWNER, SEGMENT_NAME);
+BEGIN
+  DBMS_STATS.FLUSH_DATABASE_MONITORING_INFO;
+  FOR STALE IN STALE_TABLE LOOP
+    DBMS_STATS.GATHER_TABLE_STATS(OWNNAME          => STALE.OWNER,
+                                  TABNAME          => STALE.SEGMENT_NAME,
+                                  ESTIMATE_PERCENT => STALE.PERCENT,
+                                  METHOD_OPT       => 'for all columns size repeat',
+                                  DEGREE           => 8,
+                                  GRANULARITY      => 'ALL',
+                                  CASCADE          => TRUE);
+  END LOOP;
+END;
+/
+
+
+
+
