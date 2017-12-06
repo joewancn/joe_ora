@@ -1,0 +1,229 @@
+
+
+直方图(HISTOGRAM)
+    前文提到，当某个列基数很低，该列数据分布就不均衡。数据分布不均衡，会导致查询该列的时候，要么走全表扫描，要么走索引扫描，这个时候很容易走错执行计划。
+    如果没有对基数低的列收集直方图统计信息，CBO(基于成本的优化器)会认为该列数据分布是均衡的。
+    还是以测试表test为例，以实验讲解直方图。
+    首先对测试表test收集统计信息，收集统计信息的时候，不收集列的直方图统，for all columns size 1 表示对所有列都不收集直方图：
+
+SQL> BEGIN
+  2    DBMS_STATS.GATHER_TABLE_STATS(ownname          => 'SCOTT',
+  3                                  tabname          => 'TEST',
+  4                                  estimate_percent => 100,
+  5                                  method_opt      => 'for all columns size 1',
+  6                                  no_invalidate    => FALSE,
+  7                                  degree           => 1,
+  8                                  cascade          => TRUE);
+  9  END;
+ 10  /
+
+PL/SQL procedure successfully completed.
+
+    Histogram 为none表示没有收集直方图：
+
+SQL> select a.column_name,
+  2         b.num_rows,
+  3         a.num_distinct Cardinality,
+  4         round(a.num_distinct / b.num_rows * 100, 2) selectivity,
+  5         a.histogram,
+  6         a.num_buckets
+  7    from dba_tab_col_statistics a, dba_tables b
+  8   where a.owner = b.owner
+  9     and a.table_name = b.table_name
+ 10     and a.owner = 'SCOTT'
+ 11     and a.table_name = 'TEST';
+
+COLUMN_NAME       NUM_ROWS CARDINALITY SELECTIVITY HISTOGRAM NUM_BUCKETS
+--------------- ---------- ----------- ----------- --------- -----------
+OWNER                72462          29         .04 NONE                1
+OBJECT_NAME          72462       44236       61.05 NONE                1
+SUBOBJECT_NAME       72462         106         .15 NONE                1
+OBJECT_ID            72462       72462         100 NONE                1
+DATA_OBJECT_ID       72462        7608        10.5 NONE                1
+OBJECT_TYPE          72462          44         .06 NONE                1
+CREATED              72462        1366        1.89 NONE                1
+LAST_DDL_TIME        72462        1412        1.95 NONE                1
+TIMESTAMP            72462        1480        2.04 NONE                1
+STATUS               72462           1           0 NONE                1
+TEMPORARY            72462           2           0 NONE                1
+GENERATED            72462           2           0 NONE                1
+SECONDARY            72462           2           0 NONE                1
+NAMESPACE            72462          21         .03 NONE                1
+EDITION_NAME         72462           0           0 NONE                0
+
+15 rows selected.    
+   为了让CBO选择正确的执行计划，需要对owner列收集直方图信息，从而告知CBO该列数据分布不均衡，让CBO在计算Rows的时候参考直方图统计。现在对owner列收集直方图：
+
+SQL> BEGIN
+  2    DBMS_STATS.GATHER_TABLE_STATS(ownname          => 'SCOTT',
+  3                                  tabname          => 'TEST',
+  4                                  estimate_percent => 100,
+  5                                  method_opt       => 'for columns owner size skewonly',
+  6                                  no_invalidate    => FALSE,
+  7                                  degree           => 1,
+  8                                  cascade          => TRUE);
+  9  END;
+ 10  /
+
+PL/SQL procedure successfully completed.
+
+    查看一下owner列直方图信息：
+
+SQL> select a.column_name,
+  2         b.num_rows,
+  3         a.num_distinct Cardinality,
+  4         round(a.num_distinct / b.num_rows * 100, 2) selectivity,
+  5         a.histogram,
+  6         a.num_buckets
+  7    from dba_tab_col_statistics a, dba_tables b
+  8   where a.owner = b.owner
+  9     and a.table_name = b.table_name
+ 10     and a.owner = 'SCOTT'
+ 11     and a.table_name = 'TEST';
+
+COLUMN_NAME       NUM_ROWS CARDINALITY SELECTIVITY HISTOGRAM  NUM_BUCKETS
+--------------- ---------- ----------- ----------- ---------- -----------
+OWNER                72462          29         .04 FREQUENCY           29
+OBJECT_NAME          72462       44236       61.05 NONE                 1
+SUBOBJECT_NAME       72462         106         .15 NONE                 1
+OBJECT_ID            72462       72462         100 NONE                 1
+DATA_OBJECT_ID       72462        7608        10.5 NONE                 1
+OBJECT_TYPE          72462          44         .06 NONE                 1
+CREATED              72462        1366        1.89 NONE                 1
+LAST_DDL_TIME        72462        1412        1.95 NONE                 1
+TIMESTAMP            72462        1480        2.04 NONE                 1
+STATUS               72462           1           0 NONE                 1
+TEMPORARY            72462           2           0 NONE                 1
+GENERATED            72462           2           0 NONE                 1
+SECONDARY            72462           2           0 NONE                 1
+NAMESPACE            72462          21         .03 NONE                 1
+EDITION_NAME         72462           0           0 NONE                 0
+
+15 rows selected.
+
+
+
+
+    owner列基数很低，现在对owner列进行查询：
+
+SQL> set autot trace
+SQL> select * from test where owner='SCOTT';
+
+7 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 1357081020
+
+--------------------------------------------------------------------------
+| Id  | Operation         | Name | Rows  | Bytes | Cost (%CPU)| Time     |
+--------------------------------------------------------------------------
+|   0 | SELECT STATEMENT  |      |  2499 |   236K|   289   (1)| 00:00:04 |
+|*  1 |  TABLE ACCESS FULL| TEST |  2499 |   236K|   289   (1)| 00:00:04 |
+--------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter("OWNER"='SCOTT')
+
+    请注意看粗体字部分，查询owner为SCOTT返回了7条数据，但是CBO在计算Rows的时候认为owner='SCOTT'返回2499条数据，Rows估算得不是特别准确。从72462条数据里面查询出7条数据，
+	应该走索引，所以现在对owner列创建索引：
+
+SQL> create index idx_owner on test(owner);
+
+Index created.
+
+    再来查询一下：
+
+SQL> select * from test where owner='SCOTT';
+
+7 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 3932013684
+
+-----------------------------------------------------------------------------------------
+| Id  | Operation                   | Name      | Rows  | Bytes | Cost (%CPU)| Time     |
+-----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT            |           |  2499 |   236K|    73   (0)| 00:00:01 |
+|   1 |  TABLE ACCESS BY INDEX ROWID| TEST      |  2499 |   236K|    73   (0)| 00:00:01 |
+|*  2 |   INDEX RANGE SCAN          | IDX_OWNER |  2499 |       |     6   (0)| 00:00:01 |
+-----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("OWNER"='SCOTT')
+
+    现在查询owner='SYS'
+
+SQL> select * from test where owner='SYS';
+
+30808 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 3932013684
+
+-----------------------------------------------------------------------------------------
+| Id  | Operation                   | Name      | Rows  | Bytes | Cost (%CPU)| Time     |
+-----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT            |           |  2499 |   236K|    73   (0)| 00:00:01 |
+|   1 |  TABLE ACCESS BY INDEX ROWID| TEST      |  2499 |   236K|    73   (0)| 00:00:01 |
+|*  2 |   INDEX RANGE SCAN          | IDX_OWNER |  2499 |       |     6   (0)| 00:00:01 |
+-----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("OWNER"='SYS')
+
+   
+   
+   
+    现在再来查询上面SQL，看执行计划是否还会走错，并且验证Rows是否还会算错：
+
+SQL> select * from test where owner='SCOTT';
+
+7 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 3932013684
+
+-----------------------------------------------------------------------------------------
+| Id  | Operation                   | Name      | Rows  | Bytes | Cost (%CPU)| Time     |
+-----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT            |           |     7 |   679 |     2   (0)| 00:00:01 |
+|   1 |  TABLE ACCESS BY INDEX ROWID| TEST      |     7 |   679 |     2   (0)| 00:00:01 |
+|*  2 |   INDEX RANGE SCAN          | IDX_OWNER |     7 |       |     1   (0)| 00:00:01 |
+-----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("OWNER"='SCOTT')
+
+SQL> select * from test where owner='SYS';
+
+30808 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 1357081020
+
+--------------------------------------------------------------------------
+| Id  | Operation         | Name | Rows  | Bytes | Cost (%CPU)| Time     |
+--------------------------------------------------------------------------
+|   0 | SELECT STATEMENT  |      | 30808 |  2918K|   290   (1)| 00:00:04 |
+|*  1 |  TABLE ACCESS FULL| TEST | 30808 |  2918K|   290   (1)| 00:00:04 |
+--------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter("OWNER"='SYS')
+
+    对owner列收集完直方图之后，CBO估算Rows就基本准确了，Rows估算对了，那么执行计划也就不会出错了。
