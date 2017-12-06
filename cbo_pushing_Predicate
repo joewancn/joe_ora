@@ -1,0 +1,164 @@
+
+
+
+   谓词推入(Pushing Predicate)：当SQL语句中包含有不能合并的视图，并且视图有谓词过滤(也就是where过滤条件)，CBO会将谓词过滤条件推入视图中，
+   这个过程就叫做谓词推入。谓词推入的主要目的就是让Oracle尽可能早的过滤掉无用的数据，从而提升查询性能。
+    
+    为什么谓词推入必须要有不能被合并的视图呢？
+    因为一旦视图被合并了，执行计划中根本找不到视图，这个时候谓词往哪里推呢？
+    所以谓词推入的必要前提是SQL中要有不能合并的视图。
+
+   先创建一个不能被合并的视图(视图中有union all)：
+
+SQL> create or replace view v_pushpredicate as
+  2   select  * from test
+  3    union all
+  4   select  * from test where rownum>=1;
+
+View created.
+
+
+    然后运行下面SQL，并且查看执行计划：
+
+SQL> select * from v_pushpredicate where object_id<10;
+
+16 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 669161224
+
+--------------------------------------------------------------------------------------
+| Id  | Operation                     | Name            | Rows  | Bytes | Cost (%CPU)|
+--------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                 | 72470 |    14M|   238   (1)|
+|*  1 |  VIEW                         | V_PUSHPREDICATE | 72470 |    14M|   238   (1)|
+|   2 |   UNION-ALL                   |                 |       |       |            |
+|   3 |    TABLE ACCESS BY INDEX ROWID| TEST            |     8 |   776 |     3   (0)|
+|*  4 |     INDEX RANGE SCAN          | IDX_ID          |     8 |       |     2   (0)|
+|   5 |    COUNT                      |                 |       |       |            |
+|*  6 |     FILTER                    |                 |       |       |            |
+|   7 |      TABLE ACCESS FULL        | TEST            | 72462 |  6864K|   235   (1)|
+--------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter("OBJECT_ID"<10)
+   4 - access("OBJECT_ID"<10)
+   6 - filter(ROWNUM>=1)
+
+    SQL语句中，where过滤条件是针对视图过滤的，但是从执行计划中(Id=4)可以看到，where过滤条件跑到视图中的表中过滤，这就是谓词推入。因为视图中第二个表有rownum，rownum会阻止谓词推入，所以第二个表走的是全表扫描，所以需要到视图上进行过滤(Id=1)。
+我们在看执行计划的时候，如果VIEW前面有*，这就说明有谓词没有推入到视图中。
+    一般情况下常量的谓词推入对性能的提升都是有益的。那么什么是常量的谓词推入呢？常量的谓词推入就是谓词是正常的过滤条件，而非连接列。
+  
+  
+  ============视图里面 禁止 使用 rownum ，因为谓词永远无法推入====================
+  ============          常量的谓词推入是有益的   ====================
+    ============    链接列的谓词推入是有好有坏   ====================
+  
+   现在将上面视图中的rownum去掉(为了使连接列能推入视图)：
+
+SQL> create or replace view v_pushpredicate as
+  2   select  * from test
+  3    union all
+  4   select  * from test;
+
+View created.
+
+  添加hint push_pred提示将连接列推入到视图中：
+
+SQL> select /*+ push_pred(b) */ *
+  2    from test a, v_pushpredicate b
+  3   where a.object_id = b.object_id
+  4     and a.owner = 'SCOTT';
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2131469559
+
+---------------------------------------------------------------------------------------
+| Id  | Operation                      | Name            | Rows  | Bytes | Cost (%CPU)|
+---------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |                 |  4997 |  1444K| 10073   (1)|
+|   1 |  NESTED LOOPS                  |                 |  4997 |  1444K| 10073   (1)|
+|   2 |   TABLE ACCESS BY INDEX ROWID  | TEST            |  2499 |   236K|    73   (0)|
+|*  3 |    INDEX RANGE SCAN            | IDX_OWNER       |  2499 |       |     6   (0)|
+|   4 |   VIEW                         | V_PUSHPREDICATE |     1 |   199 |     4   (0)|
+|   5 |    UNION ALL PUSHED PREDICATE  |                 |       |       |            |
+|   6 |     TABLE ACCESS BY INDEX ROWID| TEST            |     1 |    97 |     2   (0)|
+|*  7 |      INDEX RANGE SCAN          | IDX_ID          |     1 |       |     1   (0)|
+|   8 |     TABLE ACCESS BY INDEX ROWID| TEST            |     1 |    97 |     2   (0)|
+|*  9 |      INDEX RANGE SCAN          | IDX_ID          |     1 |       |     1   (0)|
+---------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("A"."OWNER"='SCOTT')
+   7 - access("OBJECT_ID"="A"."OBJECT_ID")
+   9 - access("OBJECT_ID"="A"."OBJECT_ID")
+
+将连接列推入到视图中这种谓词推入，一般在执行计划中都能看到PUSHED PREDICATE或者VIEW PUSHED PREDICATE，并且视图一般作为嵌套循环被驱动表，
+且视图中谓词被推入列有索引。
+
+这种谓词推入对性能有好有坏。
+
+为什么连接列谓词推入，被推入的视图一般都作为嵌套循环的被驱动表呢？因为连接列谓词推入需要传值(传值到视图里面)，
+而有传值操作的表连接方法只有嵌套循环或者FILTER，FILTER是专门针对半连接或者反连接的(where后面的子查询)，谓词推入是专门针对from后面的子查询，
+所以连接列谓词推入，被推入的视图一般都作为嵌套循环被驱动表。
+
+
+
+   在本书示例中，连接列谓词推入的执行计划是最优执行计划。驱动表test过滤之后(owner='SCOTT')只返回7行数据，然后通过连接列，传值7次，传入视图中，
+   视图里面的表走的是索引扫描，因为驱动表传值了7次，所以被驱动表(视图)一共被扫描了7次，但是每次扫描都是索引扫描。
+
+
+    现在去掉hint push_pred：
+
+SQL> select *
+  2    from test a, v_pushpredicate b
+  3   where a.object_id = b.object_id
+  4     and a.owner = 'SCOTT';
+
+14 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 1745523384
+
+-------------------------------------------------------------------------------------
+| Id  | Operation                    | Name            | Rows  | Bytes | Cost (%CPU)|
+-------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |                 |  4997 |  1483K|   544   (1)|
+|*  1 |  HASH JOIN                   |                 |  4997 |  1483K|   544   (1)|
+|   2 |   TABLE ACCESS BY INDEX ROWID| TEST            |  2499 |   236K|    73   (0)|
+|*  3 |    INDEX RANGE SCAN          | IDX_OWNER       |  2499 |       |     6   (0)|
+|   4 |   VIEW                       | V_PUSHPREDICATE |   144K|    28M|   470   (1)|
+|   5 |    UNION-ALL                 |                 |       |       |            |
+|   6 |     TABLE ACCESS FULL        | TEST            | 72462 |  6864K|   235   (1)|
+|   7 |     TABLE ACCESS FULL        | TEST            | 72462 |  6864K|   235   (1)|
+-------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("A"."OBJECT_ID"="B"."OBJECT_ID")
+   3 - access("A"."OWNER"='SCOTT')
+
+  
+  
+    在本书示例中，如果不将连接列推入到视图中，视图里面的表就只能全表扫描，这时性能远不如索引扫描，所以本书示例最佳执行计划就是连接列谓词推入的执行计划。
+    笔者经常遇到连接列谓词推入引起SQL性能问题，各位读者在工作中，如果遇到执行计划中VIEW PUSHED PREDICATE一定要注意，如果SQL执行很快，不用理会。
+    如果SQL执行很慢，可以先关闭连接列谓词推入(alter session set "_push_join_predicate" = false)功能，再逐步分析为什么连接列谓词推入之后，
+    SQL性能很差。连接列谓词推入性能变差一般是CBO将驱动表Rows计算错误(算少)，导致视图作为嵌套循环被驱动表，然后一直反复被扫描，
+    也有可能是视图太过复杂，视图本身存在性能问题，这时需要单独优化视图。例如视图单独执行耗时1秒，在进行谓词推入之后，视图会被扫描多次，
+    假设扫描1000次，而谓词推入之后每次执行时间从1秒提升到了0.5秒，但是视图被执行了1000次，总的耗时反而多了，这时谓词推入反而降低性能。
+
+  
+    
+    
+
