@@ -1,0 +1,60 @@
+
+
+
+【常用】定制执行计划优化SQL
+1.explain plan for
+
+2.
+select case
+         when access_predicates is not null or filter_predicates is not null then
+          '*' || id
+         else
+          ' ' || id
+       end as "Id",
+       lpad(' ', level) || operation || ' ' || options "Operation",
+       object_name "Name",
+       cardinality "Rows",
+       b.size_mb "Mb",
+       case
+         when object_type like '%TABLE%' then
+          REGEXP_COUNT(a.projection, ']') || '/' || c.column_cnt
+       end as "Column",
+       access_predicates "Access",
+       filter_predicates "Filter",
+       case
+         when object_type like '%TABLE%' then
+          projection
+       end as "Projection"
+  from plan_table a,
+       (select owner, segment_name, sum(bytes / 1024 / 1024) size_mb
+          from dba_segments
+         group by owner, segment_name) b,
+       (select owner, table_name, count(*) column_cnt
+          from dba_tab_cols
+         group by owner, table_name) c
+ where a.object_owner = b.owner(+)
+   and a.object_name = b.segment_name(+)
+   and a.object_owner = c.owner(+)
+   and a.object_name = c.table_name(+)
+ start with id = 0
+connect by prior id = parent_id;
+
+
+3.关注表大小
+
+
+考虑重点：
+table access full 前面没有*咋办
+如果表很小，那么不需理会，小表不会产生性能问题。如果表很大，那么要询问开发人员，是不搞忘了写过滤条件，当然了一般也不会遇到这种极品开发人员。如果真的是没过滤条件呢？比如一个表有10GB，但是没有过滤条件，那么它就会成为整个系统的性能瓶颈。这个时候需要查看SQL语句中该表访问了多个列，如果访问的列不多，就可以把这些列组合起来，建立一个组合索引，这个时候，索引的体积可能就只有1GB左右。利用INDEX FAST FULL SCAN代替TABLE ACCESS FULL。在访问列不多的情况，索引的体积(Segment Size)肯定比表的体积(Segment Size)小，那么就不需要扫描10GB了，就只需要扫描1GB，从而达到优化目的。如果SQL语句里面要访问表中大部分列，这时就不应该建立组合索引了，因为此时索引体积比表更大，这个时候可以通过其他方法优化，比如开启并行查询，或者是更改表连接方式，让大表作为嵌套循环的被驱动表，并且在大表的连接列上建立索引。关于表连接方式，笔者会在后面章节详细介绍。
+
+
+TABLE ACCESS FULL前面有*咋办？
+    如果表很小，那么不需理会。如果表很大，可以select count(*) from 表，查看有多少行数据，然后select count(*) from 表 where *号对应的谓词过滤条件，查看返回多少行数据。如果返回的行数在表总行数的5%以内，可以在过滤列上建立索引，如果已经存在索引，但是没走索引，这时要检查统计信息，特别是直方图信息。如果统计信息已经收集过了，可以用hint强制走索引。如果有多个谓词过滤条件，需要建立组合索引，并且要将选择性高的列放在前面，选择性低的列在后面。如果返回的行数超过表总行数的5%，这个时候要查看SQL语句中该表访问了多列，如果访问的列少，同样可以把这些列全都组合起来，建立组合索引，建立组合索引的时候，谓词过滤列在前面，连接列在中间，select部分的列在最后。如果访问的列多，这个时候就只能走全表扫描了。
+
+
+
+TABLE ACCESS BY INDEX ROWID前面有*咋办？
+
+
+
+
