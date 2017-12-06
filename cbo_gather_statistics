@@ -1,0 +1,90 @@
+
+
+
+
+/*+ dynamic_samping(6) */
+
+直方图 是不是存在 数据库 内部的 数据字典？
+所以他必须耗费system表空间，因此不能对所有列进行 直方图信息收集
+
+收集完 直方图之后    什么会计算得比较精确？
+rows
+
+什么样的列 应该收集直方图？？？
+1.在where中
+2.选择性很低，低于1%
+
+
+
+抓出需要收集统计信息直方图的脚本
+当一个表比较大，列选择性低于5%，并且列出现在where条件中，为了防止优化器估算Rows出现较大偏差，需要对这种列收集直方图。
+下面脚本抓出scott账户下，表总行数大于5w行，列选择性低于5%，并且列出现在where条件中的表以及列信息：（这个脚本依赖于统计信息，因此必须先收集统计信息，才能跑下面脚本）
+
+select a.owner,
+       a.table_name,
+       a.column_name,
+       b.num_rows,
+       a.num_distinct Cardinality,
+       round(a.num_distinct / b.num_rows * 100, 2) selectivity
+  from dba_tab_col_statistics a, dba_tables b
+ where a.owner = b.owner
+   and a.table_name = b.table_name
+   and a.owner = 'SCOTT'
+   and round(a.num_distinct / b.num_rows * 100, 2) < 5
+   and num_rows > 50000
+   and (a.table_name, a.column_name) in
+       (select o.name, c.name
+          from sys.col_usage$ u, sys.obj$ o, sys.col$ c, sys.user$ r
+         where o.obj# = u.obj#
+           and c.obj# = u.obj#
+           and c.col# = u.intcol#
+           and r.name = 'SCOTT');
+
+        在scott账户中，test表总行数大于5w行，owner列选择性小于5%，并且出现在where条件中，通过上面脚本可以将其抓出：
+
+
+SQL> select a.owner,
+  2         a.table_name,
+  3         a.column_name,
+  4         b.num_rows,
+  5         a.num_distinct Cardinality,
+  6         round(a.num_distinct / b.num_rows * 100, 2) selectivity
+  7    from dba_tab_col_statistics a, dba_tables b
+  8   where a.owner = b.owner
+  9     and a.table_name = b.table_name
+ 10     and a.owner = 'SCOTT'
+ 11     and round(a.num_distinct / b.num_rows * 100, 2) < 5
+ 12     and num_rows > 50000
+ 13     and (a.table_name, a.column_name) in
+ 14         (select o.name, c.name
+ 15            from sys.col_usage$ u, sys.obj$ o, sys.col$ c, sys.user$ r
+ 16           where o.obj# = u.obj#
+ 17             and c.obj# = u.obj#
+ 18             and c.col# = u.intcol#
+ 19             and r.name = 'SCOTT');
+
+OWNER    TABLE_NAME      COLUMN_NAME       NUM_ROWS CARDINALITY SELECTIVITY
+-------- --------------- --------------- ---------- ----------- -----------
+SCOTT    TEST            OWNER                73020          29         .04
+
+
+
+收集表的直方图慢不慢？
+慢！
+
+
+收集 统计信息的 时候 收集啥 会严重影响 收集统计信息的速度？
+
+
+收集大表的统计信息时，发现很慢，很有可能是因为收集该直方图时还收集了索引的统计信息，导致速度极慢。
+
+
+
+
+
+
+
+
+
+
+
