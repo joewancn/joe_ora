@@ -1,0 +1,236 @@
+子查询非嵌套(Subquery Unnesting)：当where子查询中有in，not in，exists，not exists等，CBO会尝试将子查询展开(unnest)，从而消除FILTER，这个过程就叫做子查询非嵌套。子查询非嵌套的目的就是消除FILTER。
+====================子查询 非嵌套 是 针对于 半连接/反连接提出来的 =====================
+
+SQL> select ename, deptno
+  2    from emp
+  3   where exists (select deptno
+  4            from dept
+  5           where dname = 'CHICAGO'
+  6             and emp.deptno = dept.deptno
+  7          union
+  8          select deptno
+  9            from dept
+ 10           where loc = 'CHICAGO'
+ 11             and dept.deptno = emp.deptno);
+
+6 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2705207488
+
+------------------------------------------------------------------------------------------
+| Id  | Operation                      | Name    | Rows  | Bytes | Cost (%CPU)| Time     |
+------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |         |     5 |    45 |    15  (40)| 00:00:01 |
+|*  1 |  FILTER                        |         |       |       |            |          |
+|   2 |   TABLE ACCESS FULL            | EMP     |    14 |   126 |     3   (0)| 00:00:01 |
+|   3 |   SORT UNIQUE                  |         |     2 |    24 |     4  (75)| 00:00:01 |
+|   4 |    UNION-ALL                   |         |       |       |            |          |
+|*  5 |     TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    13 |     1   (0)| 00:00:01 |
+|*  6 |      INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+|*  7 |     TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    11 |     1   (0)| 00:00:01 |
+|*  8 |      INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter( EXISTS ( (SELECT "DEPTNO" FROM "DEPT" "DEPT" WHERE
+              "DEPT"."DEPTNO"=:B1 AND "DNAME"='CHICAGO')UNION (SELECT "DEPTNO" FROM "DEPT"
+              "DEPT" WHERE "DEPT"."DEPTNO"=:B2 AND "LOC"='CHICAGO')))
+   5 - filter("DNAME"='CHICAGO')
+   6 - access("DEPT"."DEPTNO"=:B1)
+   7 - filter("LOC"='CHICAGO')
+   8 - access("DEPT"."DEPTNO"=:B1)
+
+执行计划中出现了FILTER，驱动表因此被固定为EMP。假设EMP有几百万甚至几千万行数据，那么该SQL效率就非常差。
+
+select ename, deptno
+  from emp
+ where deptno in  (select deptno
+          from dept
+         where dname = 'CHICAGO'
+           
+        union
+        select deptno
+          from dept
+         where loc = 'CHICAGO'
+          )
+          
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2842951954
+
+----------------------------------------------------------------------------------
+| Id  | Operation             | Name     | Rows  | Bytes | Cost (%CPU)| Time     |
+----------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT      |          |     9 |   198 |    12  (25)| 00:00:01 |
+|*  1 |  HASH JOIN            |          |     9 |   198 |    12  (25)| 00:00:01 |
+|   2 |   VIEW                | VW_NSO_1 |     2 |    26 |     8  (25)| 00:00:01 |
+|   3 |    SORT UNIQUE        |          |     2 |    24 |     8  (63)| 00:00:01 |
+|   4 |     UNION-ALL         |          |       |       |            |          |
+|*  5 |      TABLE ACCESS FULL| DEPT     |     1 |    13 |     3   (0)| 00:00:01 |
+|*  6 |      TABLE ACCESS FULL| DEPT     |     1 |    11 |     3   (0)| 00:00:01 |
+|   7 |   TABLE ACCESS FULL   | EMP      |    14 |   126 |     3   (0)| 00:00:01 |
+----------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("DEPTNO"="DEPTNO")
+   5 - filter("DNAME"='CHICAGO')
+   6 - filter("LOC"='CHICAGO')
+
+    将SQL改写为in之后，也消除了FILTER。
+
+对SQL进行等价改写之后，消除了FILTER。为什么要消除FILTER呢？因为FILTER的驱动表是固定的，一旦驱动表被固定，那么执行计划也就被固定了。对于DBA来说这并不是好事，因为一旦被固定的执行计划本身是错误的(低效的)，就会引起性能问题，想要提升性能必须改写SQL语句，但是这时SQL已经上线，SQL已经无法更改，所以，一定要消除FILTER。
+很多公司都有开发DBA，开发DBA很大一部分的工作职责就是：必须保证SQL上线之后，每个SQL语句的执行计划都是可控的，这样才能尽可能避免系统中SQL越跑越慢。
+
+
+如何才能产生FILTER呢？只需要在子查询中添加/*+ no_unnest */：
+
+SQL> select ename, deptno
+  2    from emp
+  3   where deptno in (select /*+ no_unnest */ deptno
+  4                      from dept
+  5                     where dname = 'CHICAGO'
+  6                    union
+  7                    select deptno from dept where loc = 'CHICAGO');
+
+6 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2705207488
+
+------------------------------------------------------------------------------------------
+| Id  | Operation                      | Name    | Rows  | Bytes | Cost (%CPU)| Time     |
+------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |         |     5 |    45 |    15  (40)| 00:00:01 |
+|*  1 |  FILTER                        |         |       |       |            |          |
+|   2 |   TABLE ACCESS FULL            | EMP     |    14 |   126 |     3   (0)| 00:00:01 |
+|   3 |   SORT UNIQUE                  |         |     2 |    24 |     4  (75)| 00:00:01 |
+|   4 |    UNION-ALL                   |         |       |       |            |          |
+|*  5 |     TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    13 |     1   (0)| 00:00:01 |
+|*  6 |      INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+|*  7 |     TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    11 |     1   (0)| 00:00:01 |
+|*  8 |      INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter( EXISTS ( (SELECT /*+ NO_UNNEST */ "DEPTNO" FROM "DEPT" "DEPT"
+              WHERE "DEPTNO"=:B1 AND "DNAME"='CHICAGO')UNION (SELECT "DEPTNO" FROM "DEPT"
+              "DEPT" WHERE "DEPTNO"=:B2 AND "LOC"='CHICAGO')))
+   5 - filter("DNAME"='CHICAGO')
+   6 - access("DEPTNO"=:B1)
+   7 - filter("LOC"='CHICAGO')
+   8 - access("DEPTNO"=:B1)
+  请注意，虽然笔者一直强调要消除执行计划中的FILTER，笔者的意思是要保证执行计划是可控的，并不意味着执行计划产生了FILTER就一定性能差，相反有时候我们还可以用FILTER来优化SQL。 
+
+
+====>
+ 哪些SQL写法容易产生FILTER呢？当子查询采用了exists或者not exists，子查询中有固化子查询关键词(union/union all/start with connect by/rownum/cube/rollup)，那么执行计划中就容易产生filter，例如：
+
+ exists中有rownum产生FILTER：
+
+SQL> select ename, deptno
+  2    from emp
+  3   where  exists (select deptno
+  4            from dept
+  5           where loc = 'CHICAGO'
+  6             and dept.deptno = emp.deptno
+  7             and rownum <= 1);
+
+6 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 3414630506
+
+-----------------------------------------------------------------------------------------
+| Id  | Operation                     | Name    | Rows  | Bytes | Cost (%CPU)| Time     |
+-----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |         |     5 |    45 |     6   (0)| 00:00:01 |
+|*  1 |  FILTER                       |         |       |       |            |          |
+|   2 |   TABLE ACCESS FULL           | EMP     |    14 |   126 |     3   (0)| 00:00:01 |
+|*  3 |   COUNT STOPKEY               |         |       |       |            |          |
+|*  4 |    TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    11 |     1   (0)| 00:00:01 |
+|*  5 |     INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+-----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter( EXISTS (SELECT 0 FROM "DEPT" "DEPT" WHERE ROWNUM<=1 AND
+              "DEPT"."DEPTNO"=:B1 AND "LOC"='CHICAGO'))
+   3 - filter(ROWNUM<=1)
+   4 - filter("LOC"='CHICAGO')
+   5 - access("DEPT"."DEPTNO"=:B1)
+    exists中有树形查询产生FILTER：
+
+SQL> select *
+  2    from dept
+  3   where exists (select null
+  4            from emp
+  5           where dept.deptno = emp.deptno
+  6           start with empno = 7698
+  7          connect by prior empno = mgr);
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 4210865686
+
+----------------------------------------------------------------------------------------
+| Id  | Operation                                  | Name | Rows  | Bytes | Cost (%CPU)|
+----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                           |      |     1 |    20 |     9   (0)|
+|*  1 |  FILTER                                    |      |       |       |            |
+|   2 |   TABLE ACCESS FULL                        | DEPT |     4 |    80 |     3   (0)|
+|*  3 |   FILTER                                   |      |       |       |            |
+|*  4 |    CONNECT BY NO FILTERING WITH SW (UNIQUE)|      |       |       |            |
+|   5 |     TABLE ACCESS FULL                      | EMP  |    14 |   154 |     3   (0)|
+----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter( EXISTS (SELECT 0 FROM "EMP" "EMP" WHERE "EMP"."DEPTNO"=:B1 START WITH
+              "EMPNO"=7698 CONNECT BY "MGR"=PRIOR "EMPNO"))
+   3 - filter("EMP"."DEPTNO"=:B1)
+   4 - access("MGR"=PRIOR "EMPNO")
+       filter("EMPNO"=7698)
+
+将SQL改成in 就会消除掉filter
+
+########################
+总结下：
+exists/not exists中(rownum,union all,start with...cube...)就会产生filter，将此类SQL改成in 可以。
+
+理由：
+    为什么exists/not exists容易产生FILTER，而in很少会产生filter呢？
+    当子查询中有固化关键字(union/union all/start with connect by/rownum/cube/rollup)，这个时候子查询会被固化为一个整体，
+    采用exists/not exists这种写法，这时子查询中有主表连接列，这时就只能是主表通过连接列传值给子表，所以CBO只能选择FILTER。
+    
+    而如果将SQL改写为in/not in这种写法，子查询虽然被固化为整体，但是子查询中没有主表连接列字段，这个时候CBO就不会选择FILTER
+    
+    
+    如果 子查询中  没有  union/union all/start with connect by/rownum/cube/rollup，in exists 执行计划是一样的
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
+
+
+
