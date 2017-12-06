@@ -161,5 +161,128 @@ select a.*, c.grade
 
 
 
+  有些读者可能遇到过类似案例，如下面SQL所示：
+
+select ... from () a,() b where a.id=b.id;
+
+    单独执行子查询a，速度非常快，单独执行子查询b,速度也非常快，但是把上面2个子查询组合在一起，速度反而很慢，这就是典型的视图合并引起的性能问题。遇到类似问题，可以添加hint no_merge禁止视图合并，也可以让子查询a与子查询b进行hash连接，当子查询a与子查询b进行hash连接之后，就不会发生视图合并了：
+
+select /*+ use_hash(a,b) */ ... from () a,() b where a.id=b.id;
+
+    为什么让子查询a与子查询b进行hash连接能使SQL变快呢？各位读者再回忆一下hash连接的算法，嵌套循环会传值(驱动表传值给被驱动表，通过连接列)，hash连接不会传值，因为hash连接不传值，所以当子查询a与子查询b进行hash连接之后，会自动的把子查询a与子查询b作为一个整体。
+
+
+
+    与子查询非嵌套一样，当视图中有固化子查询关键字的时候，就不能发生视图合并。
+固化子查询关键字包括(union/union all/start with connect by/rownum/cube/rollup)。
+    现在对示例SQL添加union all，查看SQL执行计划：
+
+SQL> select a.*, c.grade
+  2    from (select ename, sal, a.deptno, b.dname
+  3            from emp a, dept b
+  4           where a.deptno = b.deptno
+  5          union all
+  6          select 'SMITH', 1600, 10, 'ACCOUNTING' from dual) a,
+  7         salgrade c
+  8   where a.sal between c.losal and c.hisal;
+
+15 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 1428389312
+
+-----------------------------------------------------------------------------------
+| Id  | Operation                         | Name     | Rows  | Bytes | Cost (%CPU)|
+-----------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                  |          |     1 |    81 |    13  (24)|
+|   1 |  MERGE JOIN                       |          |     1 |    81 |    13  (24)|
+|   2 |   SORT JOIN                       |          |     5 |   195 |     4  (25)|
+|   3 |    TABLE ACCESS FULL              | SALGRADE |     5 |   195 |     3   (0)|
+|*  4 |   FILTER                          |          |       |       |            |
+|*  5 |    SORT JOIN                      |          |    15 |   630 |     9  (23)|
+|   6 |     VIEW                          |          |    15 |   630 |     8  (13)|
+|   7 |      UNION-ALL                    |          |       |       |            |
+|   8 |       MERGE JOIN                  |          |    14 |   364 |     6  (17)|
+|   9 |        TABLE ACCESS BY INDEX ROWID| DEPT     |     4 |    52 |     2   (0)|
+|  10 |         INDEX FULL SCAN           | PK_DEPT  |     4 |       |     1   (0)|
+|* 11 |        SORT JOIN                  |          |    14 |   182 |     4  (25)|
+|  12 |         TABLE ACCESS FULL         | EMP      |    14 |   182 |     3   (0)|
+|  13 |       FAST DUAL                   |          |     1 |       |     2   (0)|
+-----------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - filter("A"."SAL"<="C"."HISAL")
+   5 - access("A"."SAL">="C"."LOSAL")
+       filter("A"."SAL">="C"."LOSAL")
+  11 - access("A"."DEPTNO"="B"."DEPTNO")
+       filter("A"."DEPTNO"="B"."DEPTNO")
+
+    从执行计划中可以看到，添加了union all之后，子查询被固化，没有发生视图合并。
+
+
+
+
+    现在对SQL添加rownum，查看SQL执行计划：
+
+SQL> select a.*, c.grade
+  2    from (select ename, sal, a.deptno, b.dname
+  3            from emp a, dept b
+  4           where a.deptno = b.deptno
+  5             and rownum >= 1) a,
+  6         salgrade c
+  7   where a.sal between c.losal and c.hisal;
+
+14 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 819637296
+
+------------------------------------------------------------------------------------
+| Id  | Operation                          | Name     | Rows  | Bytes | Cost (%CPU)|
+------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                   |          |     1 |    72 |    11  (28)|
+|   1 |  MERGE JOIN                        |          |     1 |    72 |    11  (28)|
+|   2 |   SORT JOIN                        |          |     5 |   195 |     4  (25)|
+|   3 |    TABLE ACCESS FULL               | SALGRADE |     5 |   195 |     3   (0)|
+|*  4 |   FILTER                           |          |       |       |            |
+|*  5 |    SORT JOIN                       |          |    14 |   462 |     7  (29)|
+|   6 |     VIEW                           |          |    14 |   462 |     6  (17)|
+|   7 |      COUNT                         |          |       |       |            |
+|*  8 |       FILTER                       |          |       |       |            |
+|   9 |        MERGE JOIN                  |          |    14 |   364 |     6  (17)|
+|  10 |         TABLE ACCESS BY INDEX ROWID| DEPT     |     4 |    52 |     2   (0)|
+|  11 |          INDEX FULL SCAN           | PK_DEPT  |     4 |       |     1   (0)|
+|* 12 |         SORT JOIN                  |          |    14 |   182 |     4  (25)|
+|  13 |          TABLE ACCESS FULL         | EMP      |    14 |   182 |     3   (0)|
+------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - filter("A"."SAL"<="C"."HISAL")
+   5 - access("A"."SAL">="C"."LOSAL")
+       filter("A"."SAL">="C"."LOSAL")
+   8 - filter(ROWNUM>=1)
+  12 - access("A"."DEPTNO"="B"."DEPTNO")
+       filter("A"."DEPTNO"="B"."DEPTNO")
+
+    从执行计划中可以看到，添加了rownum之后，子查询同样被固化，没有发生视图合并。
+
+##########################################
+
+视图 合并 针对 哪里的 子查询的？
+from 后面（内联）
+
+子查询非浅套针对哪里的子查询？
+where 
+
+
+##########################################
+
+
 
 
