@@ -1,0 +1,30 @@
+
+
+先收集统计信息
+ BEGIN
+   DBMS_STATS.GATHER_TABLE_STATS(ownname          => 'SCOTT',
+                                 tabname          => 'T1',
+                                 estimate_percent => 100,
+                                 method_opt       => 'for all columns size 1',
+                                 no_invalidate    => FALSE,
+                                 degree           => 1,
+                                 cascade          => TRUE);
+ END;
+ /
+
+
+然后跑以下脚本，查看表选择性、基数、直方图（查看表所有统计信息）
+select a.column_name,
+       b.num_rows,
+       a.num_distinct Cardinality,
+       round(a.num_distinct / b.num_rows * 100, 2) selectivity,
+       a.histogram,
+       a.num_buckets
+  from dba_tab_col_statistics a, dba_tables b
+ where a.owner = b.owner
+   and a.table_name = b.table_name
+   and a.owner = 'SCOTT'
+   and a.table_name = 'TEST';
+若选择率低于20%；并且列出现在where中，则必须收集直方图
+
+
