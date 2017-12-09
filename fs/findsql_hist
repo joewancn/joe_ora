@@ -1,0 +1,6 @@
+select t.sql_id,
+    t.sql_text,
+    s.executions_total,
+    s.elapsed_time_total
+from DBA_HIST_SQLSTAT s, DBA_HIST_SQLTEXT t
+where s.snap_id between 333 and 350;   <====use snapid in which the query was ran
