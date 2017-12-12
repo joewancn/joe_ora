@@ -1,0 +1,50 @@
+UAT to UAT
+
+
+
+shutdown immediate;
+
+startup mount;
+--在mount下，可以节省备份归档的空间。
+
+run{
+allocate channel ch0 type disk;
+allocate channel ch1 type disk;
+backup as compressed backupset database format '/u01/backup/db_%d_%U' tag 'fullbackup';
+release channel ch0;
+release channel ch1;
+}
+
+
+list backup of spfile;
+--
+
+list backup of controlfile;
+--
+
+list backup of database;
+--
+
+
+export ORACLE_SID=uat
+
+startup nomount;
+
+
+RMAN> restore controlfile from '/u01/backup/db_TTK_03slvecg_1_1';
+
+
+SQL> alter database mount;
+
+
+RMAN> restore database;
+
+RMAN> recover database;
+
+
+SQL> alter database open resetlogs;
+
+select status from v$instance;
+
+
+
