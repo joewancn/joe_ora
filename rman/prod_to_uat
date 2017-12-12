@@ -1,4 +1,9 @@
 
+
+background:
+Restoration from Prod to UAT with different SID
+
+
 1.
 接着uat_to_uat,做好备份，关闭uat，并删除所有数据文件。
 
@@ -32,7 +37,10 @@ release channel ch1;
 
 6.恢复前准备
 6.1 禁掉block_change_tracking
-alter database disable xxx;
+alter database disable block change tracking;
+
+#启用alter database enable block change tracking using file '/xxxx/rman_change_track.f' reuse;
+
 
 6.2 查看数据文件路径
 rman>list backup of database;
@@ -45,10 +53,10 @@ SQL> alter database rename file '/oracle/u02/oradata/ora11g/redo01.log' to '/ora
 7.恢复
 rman> run {
 allocate channel ch1 type 'sbt_tape' params '';
-set newname datafile 1 to '/xx/xxx/xxx.dbf';
-set newname datafile 2 to '/xx/xxx/xxx.dbf';
+set newname for datafile 1 to '/xxx/xxx/xxx.dbf';
+set newname for datafile 2 to '/xxx/xxx/xxx.dbf';
 .....
-set newname datafile n to '/xx/xxx/xxx.dbf';
+set newname for datafile n to '/xxx/xxx/xxx.dbf';
 
 set untiltime 'xxxx'
 restore database;
