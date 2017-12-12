@@ -1,0 +1,66 @@
+
+1.
+接着uat_to_uat,做好备份，关闭uat，并删除所有数据文件。
+
+
+2.恢复参数文件
+export ORACLE_SID=PXXXX
+
+startup nomount;
+
+rman>run{
+allocate channel ch1 type 'sbt_tape' params '';
+restore spfile to '' from ''
+release channel ch1;
+}
+
+
+3.通过restore所得的spfile启动数据库，并创建一个pfile，修改其中的参数，如监听名称，创建新的目录等
+
+
+4.恢复控制文件
+rman>run{
+allocate channel ch1 type 'sbt_tape' params '';
+restore controlfile  from '' --  to ''可以制定到某处，或者直接通过启动的spfile，会自动恢复到对应目录 
+#这里的控制文件可以从生产的备份中直接找到piecename进行恢复
+release channel ch1;
+}
+
+
+5.恢复成功之后， alter database mount;
+
+
+6.恢复前准备
+6.1 禁掉block_change_tracking
+alter database disable xxx;
+
+6.2 查看数据文件路径
+rman>list backup of database;
+
+6.3 修改redo日志路径
+
+SQL> alter database rename file '/oracle/u02/oradata/ora11g/redo01.log' to '/oracle/u02/oradata/ora11g/redo01_01.log';
+
+
+7.恢复
+rman> run {
+allocate channel ch1 type 'sbt_tape' params '';
+set newname datafile 1 to '/xx/xxx/xxx.dbf';
+set newname datafile 2 to '/xx/xxx/xxx.dbf';
+.....
+set newname datafile n to '/xx/xxx/xxx.dbf';
+
+set untiltime 'xxxx'
+restore database;
+switch datafile all;
+recover database;
+}
+
+
+8.alter database open resetlog;
+
+
+
+
+
+
