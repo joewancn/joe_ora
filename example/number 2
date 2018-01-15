@@ -1,0 +1,227 @@
+
+
+外连接有OR关联条件只能走NL
+    下面SQL有OR关联条件：
+
+SELECT A.CONTRACT_ID, B.BORROWER_ID
+  FROM blfct.bl_rtl_con_overdue_fact A
+  LEFT JOIN BLpub.Bl_Contract_Dim B ON A.DEALER_ID = B.DEALER_ID
+                                    OR A.OVERDUE_DD = B.Overdue_Dd
+ WHERE A.ETL_DATE BETWEEN DATE '2016-12-19' AND DATE '2016-12-20';
+      
+    执行计划如下：
+
+Plan hash value: 121649910
+ 
+------------------------------------------------------------------------------------
+| Id  | Operation           | Name                    | Rows  | Bytes | Cost (%CPU)| 
+------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT    |                         |   163M|  5469M|  4421M  (1)|
+|   1 |  NESTED LOOPS OUTER |                         |   163M|  5469M|  4421M  (1)|
+|*  2 |   TABLE ACCESS FULL | BL_RTL_CON_OVERDUE_FACT |   181K|  3898K|  2192K  (2)| 
+|   3 |   VIEW              |                         |   903 | 11739 | 24354   (1)| 
+|*  4 |    TABLE ACCESS FULL| BL_CONTRACT_DIM         |   903 | 12642 | 24354   (1)| 
+  ----------------------------------------------------------------------------------
+   
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+   
+     2 - filter("A"."ETL_DATE"&get;=TO_DATE(' 2016-12-19 00:00:00', 'syyyy-mm-dd 
+                hh24:mi:ss') AND "A"."ETL_DATE"<=TO_DATE(' 2016-12-20 00:00:00', 'syyyy-mm-dd 
+                hh24:mi:ss'))
+     4 - filter("A"."OVERDUE_DD"="B"."OVERDUE_DD" OR "A"."DEALER_ID"="B"."DEALER_ID")
+ 
+    从执行计划中看到，两表走的是嵌套循环。当两表用外连接进行关联，关联条件中有OR关联条件，那么这时只能走嵌套循环，并且驱动表固定为主表，此时不能走hash连接，即使通过HINT：USE_HASH也无法修改执行计划。如果主表数据量很大，那么这时就会出现严重性能问题。可以将外连接的OR关联/过滤条件放到查询中，用case when进行过滤，从而让SQL可以走hash连接：
+
+EXPLAIN PLAN FOR 
+SELECT A.CONTRACT_ID,
+       case
+         when A.DEALER_ID = B.DEALER_ID OR A.OVERDUE_DD = B.Overdue_Dd then
+          B.BORROWER_ID
+       end
+  FROM blfct.bl_rtl_con_overdue_fact A
+  LEFT JOIN BLpub.Bl_Contract_Dim B ON A.DEALER_ID = B.DEALER_ID
+ WHERE A.ETL_DATE BETWEEN DATE '2016-12-19' AND DATE '2016-12-20';
+
+    执行计划如下：
+
+select * from table(dbms_xplan.display());
+  
+Plan hash value: 3927476067
+ 
+-------------------------------------------------------------------------------------------
+| Id  | Operation          | Name                    | Rows  | Bytes |TempSpc| Cost (%CPU)|
+-------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |                         |    57M|  1965M|       |  2218K  (2)|
+|*  1 |  HASH JOIN OUTER   |                         |    57M|  1965M|  6032K|  2218K  (2)|
+|*  2 |   TABLE ACCESS FULL| BL_RTL_CON_OVERDUE_FACT |   181K|  3898K|       |  2192K  (2)|
+|   3 |   TABLE ACCESS FULL| BL_CONTRACT_DIM         |   640K|  8763K|       | 24349   (1)|
+-------------------------------------------------------------------------------------------
+   
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+   
+     1 - access("A"."DEALER_ID"="B"."DEALER_ID"(+))
+     2 - filter("A"."ETL_DATE"&get;=TO_DATE(' 2016-12-19 00:00:00', 'syyyy-mm-dd hh24:mi:ss') AND 
+                "A"."ETL_DATE"<=TO_DATE(' 2016-12-20 00:00:00', 'syyyy-mm-dd hh24:mi:ss')) 
+
+
+
+
+    利用case when改写外连接OR连接条件有个限制：从表只能是1的关系，从表不能是n的关系，从表要展示多少个列，就要写多少个case when。
+    笔者利用emp与dept进行讲解。emp与dept是n:1关系，现有如下SQL：
+
+select e.*, d.deptno deptno2, d.loc
+  from scott.emp e
+  left join scott.dept d on d.deptno = e.deptno
+                        and (d.deptno &get;= e.sal and e.sal < 1000 or
+                            e.ename like '%O%');
+
+    执行计划如下：
+
+----------------------------------------------------------
+Plan hash value: 2962868874
+
+-----------------------------------------------------------------------------------------
+| Id  | Operation                     | Name    | Rows  | Bytes | Cost (%CPU)| Time     |
+-----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |         |    14 |   826 |    17   (0)| 00:00:01 |
+|   1 |  NESTED LOOPS OUTER           |         |    14 |   826 |    17   (0)| 00:00:01 |
+|   2 |   TABLE ACCESS FULL           | EMP     |    14 |   532 |     3   (0)| 00:00:01 |
+|   3 |   VIEW                        |         |     1 |    21 |     1   (0)| 00:00:01 |
+|*  4 |    TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    11 |     1   (0)| 00:00:01 |
+|*  5 |     INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+-----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - filter("E"."ENAME" IS NOT NULL AND "E"."ENAME" IS NOT NULL AND
+              "E"."ENAME" LIKE '%O%' OR "D"."DEPTNO"&get;="E"."SAL" AND "E"."SAL"<1000)
+   5 - access("D"."DEPTNO"="E"."DEPTNO") 
+
+    执行计划中两表关联走的是嵌套循环，驱动表是主表EMP。现在添加HINT：USE_HASH尝试改变表连接方式：
+
+SQL&get; select /*+ use_hash(e,d) */
+  2   e.*, d.deptno deptno2, d.loc
+  3    from scott.emp e
+  4    left join scott.dept d on d.deptno = e.deptno
+  5                          and (d.deptno &get;= e.sal and e.sal < 1000 or
+  6                              e.ename like '%O%');
+
+14 rows selected.
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 2962868874
+---------------------------------------------------------------------------------------
+| Id  | Operation                     | Name    | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |         |    14 |   826 |    17   (0)| 00:00:01 |
+|   1 |  NESTED LOOPS OUTER           |         |    14 |   826 |    17   (0)| 00:00:01 |
+|   2 |   TABLE ACCESS FULL           | EMP     |    14 |   532 |     3   (0)| 00:00:01 |
+|   3 |   VIEW                        |         |     1 |    21 |     1   (0)| 00:00:01 |
+|*  4 |    TABLE ACCESS BY INDEX ROWID| DEPT    |     1 |    11 |     1   (0)| 00:00:01 |
+|*  5 |     INDEX UNIQUE SCAN         | PK_DEPT |     1 |       |     0   (0)| 00:00:01 |
+---------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - filter("E"."ENAME" IS NOT NULL AND "E"."ENAME" IS NOT NULL AND
+              "E"."ENAME" LIKE '%O%' OR "D"."DEPTNO"&get;="E"."SAL" AND "E"."SAL"<1000)
+   5 - access("D"."DEPTNO"="E"."DEPTNO") 
+
+
+    添加HINT无法更改执行计划。因为SQL语句中从表DEPT属于1的关系，从表DEPT要展示2个列，需要对应写上2个case when，改写的SQL如下：
+
+select e.*,
+       case
+         when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+          d.deptno
+       end deptno2,
+       case
+         when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+          d.loc
+       end loc
+  from scott.emp e
+  left join scott.dept d on d.deptno = e.deptno;
+
+    改写后的执行计划如下：
+
+SQL&get; select e.*,
+  2         case
+  3           when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+  4            d.deptno
+  5         end deptno2,
+  6         case
+  7           when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+  8            d.loc
+  9         end loc
+ 10    from scott.emp e
+ 11    left join scott.dept d on d.deptno = e.deptno;
+
+14 rows selected.
+
+
+Execution Plan
+----------------------------------------------------------
+Plan hash value: 3387915970
+
+---------------------------------------------------------------------------
+| Id  | Operation          | Name | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |      |    14 |   686 |     7  (15)| 00:00:01 |
+|*  1 |  HASH JOIN OUTER   |      |    14 |   686 |     7  (15)| 00:00:01 |
+|   2 |   TABLE ACCESS FULL| EMP  |    14 |   532 |     3   (0)| 00:00:01 |
+|   3 |   TABLE ACCESS FULL| DEPT |     4 |    44 |     3   (0)| 00:00:01 |
+---------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("D"."DEPTNO"(+)="E"."DEPTNO")
+    
+    用case when改写之后，两表自动就走了hash连接。 
+
+
+    如果主表属于1的关系，从表属于n的关系，就不能用case when进行等价改写。例如：
+
+select d.*, e.deptno deptno2, e.ename, e.sal
+  from dept d
+  left join emp e on d.deptno = e.deptno
+                 and (d.deptno &get;= e.sal and e.sal < 1000 or
+                     e.ename like '%O%');
+
+    SQL中dept是主表，emp是从表，dept与emp是1：n的关系，此时不能将SQL改写为：
+
+select d.*,
+       case
+         when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+          e.deptno
+       end deptno2,
+       case
+         when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+          e.ename
+       end ename,
+       case
+         when (d.deptno &get;= e.sal and e.sal < 1000 or e.ename like '%O%') then
+          e.sal
+       end sal
+  from dept d
+  left join emp e on d.deptno = e.deptno; 
+
+
+    可以将SQL改写为：
+
+select b.*, a.deptno, a.ename, a.sal
+  from dept b
+  left join (select d.deptno, e.ename, e.sal
+               from dept d, emp e
+              where d.deptno = e.deptno
+                and (d.deptno &get;= e.sal and e.sal < 1000 or
+                    e.ename like '%O%')) a on b.deptno = a.deptno;
+
+    如果两表是n：n关系，这时就无法对SQL进行改写了，在日常工作中也遇不到n：n关系。 
+
+ 
