@@ -1,0 +1,176 @@
+
+
+
+关联更新:
+
+
+能不能想办法提升一下下面UPDATE语句性能，该UPDATE执行了30分钟还没执行完毕，SQL语句如下：
+
+UPDATE OPT_ACCT_FDIM A
+   SET ACCT_SKID = (SELECT ACCT_SKID
+                      FROM OPT_ACCT_FDIM_BKP B
+                     WHERE A.ACCT_ID = B.ACCT_ID);
+                     
+ OPT_ACCT_FDIM有226474行数据，OPT_ACCT_FDIM_BKP有227817行数据。
+ UPDATE后面跟子查询类似嵌套循环，它的算法与标量子查询，Filter一模一样。
+ 也就是说OPT_ACCT_FDIM表相当于嵌套循环的驱动表，OPT_ACCT_FDIM_BKP相当于嵌套循环的被驱动表，那么这里表OPT_ACCT_FDIM_BKP就会被扫描20多万次。
+ OPT_ACCT_FDIM_BKP是通过CTAS创建的备份表，用来备份OPT_ACCT_FDIM表的数据。
+ 嵌套循环被驱动表应该走索引，但是OPT_ACCT_FDIM_BKP是通过CTAS创建的，仅仅用于备份，该表上面没有任何索引，这就是说OPT_ACCT_FDIM_BKP要被扫描20多万次，
+ 而且每次都是全表扫描，这就是为什么UPDATE执行了30分钟还没执行完毕。
+ 可以创建一个索引(ACCT_ID,ACCT_SKID)从而避免OPT_ACCT_FDIM_BKP每次被全表扫描，虽然这种方法能优化该SQL，但是此时索引会被扫描20多万次。
+ 如果要更新的表有几千万行，甚至上亿行数据，显然不能通过创建索引的方法来优化SQL。
+ 考虑到ETL开发人员后续还有类似需求，笔者决定采用存储过程并且利用ROWID对关联更新进行优化。
+ 
+ 
+ 
+    存储过程代码如下：
+
+SQL> DECLARE
+  2    CURSOR CUR_B IS
+  3      SELECT 
+  4       B.ACCT_ID, B.ACCT_SKID, A.ROWID ROW_ID
+  5        FROM OPT_ACCT_DIM A, OPT_ACCT_DIM_BKP B
+  6       WHERE A.ACCT_ID = B.ACCT_ID
+  7       ORDER BY A.ROWID;  
+  8    V_COUNTER NUMBER;
+  9  BEGIN
+ 10    V_COUNTER := 0;
+ 11    FOR ROW_B IN CUR_B LOOP
+ 12      UPDATE OPT_ACCT_DIM
+ 13         SET ACCT_SKID = ROW_B.ACCT_SKID
+ 14       WHERE ROWID = ROW_B.ROW_ID;
+ 15      V_COUNTER := V_COUNTER + 1;
+ 16      IF (V_COUNTER >= 1000) THEN
+ 17        COMMIT;
+ 18        V_COUNTER := 0;
+ 19      END IF;
+ 20    END LOOP;
+ 21    COMMIT;
+ 22  END;
+ 23  /
+
+PL/SQL procedure successfully completed.
+
+Elapsed: 00:01:21.58
+
+存储过程代码如下：
+
+SQL> DECLARE
+  2    CURSOR CUR_B IS
+  3      SELECT 
+  4       B.ACCT_ID, B.ACCT_SKID, A.ROWID ROW_ID
+  5        FROM OPT_ACCT_DIM A, OPT_ACCT_DIM_BKP B
+  6       WHERE A.ACCT_ID = B.ACCT_ID
+  7       ORDER BY A.ROWID;  
+  8    V_COUNTER NUMBER;
+  9  BEGIN
+ 10    V_COUNTER := 0;
+ 11    FOR ROW_B IN CUR_B LOOP
+ 12      UPDATE OPT_ACCT_DIM
+ 13         SET ACCT_SKID = ROW_B.ACCT_SKID
+ 14       WHERE ROWID = ROW_B.ROW_ID;
+ 15      V_COUNTER := V_COUNTER + 1;
+ 16      IF (V_COUNTER >= 1000) THEN
+ 17        COMMIT;
+ 18        V_COUNTER := 0;
+ 19      END IF;
+ 20    END LOOP;
+ 21    COMMIT;
+ 22  END;
+ 23  /
+
+PL/SQL procedure successfully completed.
+
+Elapsed: 00:01:21.58
+
+
+
+通过merge into进行并行优化：
+
+
+alter session enable parallel dml;
+
+ merge /*+ parallel(6) */ into OPT_ACCT_FDIM A
+  using OPT_ACCT_FDIM_BKP B
+on (A.ACCT_ID = B.ACCT_ID)
+  when mached then update set a.ACCT_SKID = B.ACCT_SKID;
+
+  
+  2个表 关联更新 最快  的是 什么方法？？？
+ 最安全 又最快 的 关联更新 应该怎么做？
+人工的 ROWID 切片 ，开多个窗口 执行。
+
+
+
+细心的读者会发现，在游标定义中，笔者对要更新的表根据ROWID进行了排序操作，这是为什么呢？同一个块中ROWID是连续的，物理上连续的块组成了区，
+那么同一个区里面ROWID也是连续的，对ROWID进行排序是为了保证在更新表的时候，被更新的块尽量不被刷出buffer cache，从而减少物理I/O。
+假设要被更新的表有20G，数据库的buffer cache只有10G，这时buffer cache不能完全容纳要被更新的表，有部分块会被挤压出buffer cache。
+这时如果不对ROWID进行排序，被更新的块有可能会被反复读入buffer cache，然后挤压出buffer cache，然后重复读入，挤压，此时会引发大量的I/O读写操作
+。假设一个块存储200行数据，最极端的情况就是每个块要被读入/写出到磁盘200次，这样读取的表就不是20G，而是200*20G。如果对ROWID进行排序，
+这样就能保证一个块只需被读入buffer cache一次，这样就避免了大量的I/O读写操作。有读者会问，排序不也耗费资源吗？这时排序耗费的资源远远低
+于数据块被反复挤压出buffer cache所耗费的开销。如果要被更新的表很小，buffer cache能完全容纳下要被更新的表，这时就不要对ROWID进行排序了，
+
+因为buffer cache很大，块不会被挤压出buffer cache，此时对ROWID排序反而会影响性能。各位读者以后遇到类似需求，要先比较被更新的表与buffer 
+cache大小，同时也要考虑数据库繁忙程度，buffer cache还剩余多少空闲块等等一系列因素。
+
+
+ 下面实验，验证如果不对ROWID排序，块有可能被反复扫描的观点：
+
+    先创建2个表，分别取名为a，b，为了模拟实际情况，将a，b中数据随机打乱存储：
+
+create table a as select * from dba_objects order by dbms_random.value;
+
+create table b as select * from dba_objects order by dbms_random.value;
+
+    查看返回结果：
+
+SQL> select owner,rid as "ROWID",block#
+  2    from (SELECT B.owner,
+  3                 A.ROWID rid,
+  4                 dbms_rowid.rowid_block_number(A.rowid) block#
+  5            FROM A, B
+  6           WHERE A.object_id = B.object_id)
+  7   where rownum <= 10;
+
+OWNER           ROWID                  BLOCK#
+--------------- ------------------ ----------
+PUBLIC          AAAS+CAAEAACEPdAAs     541661
+PUBLIC          AAAS+CAAEAACEp2AAP     543350
+SYS             AAAS+CAAEAACEgFAAJ     542725
+SYS             AAAS+CAAEAACEu9AAc     543677
+MDSYS           AAAS+CAAEAACEknAAi     543015
+SYS             AAAS+CAAEAACEutAA9     543661
+SYS             AAAS+CAAEAACEhRAA4     542801
+SYSMAN          AAAS+CAAEAACEvzAAC     543731
+PUBLIC          AAAS+CAAEAACElBAAj     543041
+PUBLIC          AAAS+CAAEAACEwUAAy     543764
+
+    从SQL查询结果中看到，返回的数据是无序的。如果关联的两个表连接列本身是有序递增的，
+    比如：序列值，时间，这时两表关联返回的结果是部分有序的，可以不用排序，在实际工作中，具体情况具体分析。
+    本案例也可以采用MERGE INTO对UPDATE子查询进行等价改写：
+
+ merge into OPT_ACCT_FDIM A
+  using OPT_ACCT_FDIM_BKP B
+on (A.ACCT_ID = B.ACCT_ID)
+  when mached then update set a.ACCT_SKID = B.ACCT_SKID;
+
+    MERGE INTO可以自由控制走嵌套循环或者走hash连接，并且MERGE INTO可以开启并行DML，并行查询，而采用PLSQL更新不能开启并行，
+    所以MERGE INTO在速度上有优势。PLSQL更新可以批量提交，对UNDO占用小，而MERGE INTO要等提交的时候才会释放UNDO
+    ，采用PLSQL更新不需要担心进程突然断开连接，MERGE INTO更新如果进程断开连接会导致UNDO很难释放。所以，如果追求更新速度，
+    并且被更新的表并发量很小，可以考虑采用MERGE INTO，如果追求安全，平稳，可以采用PLSQL更新。
+    
+    
+    超大量 数据 更新 ----人工 ROWID 切片 更新
+    
+    
+    
+    
+
+  
+  
+  
+  
+
+
+                     
+                     
