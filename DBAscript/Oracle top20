@@ -1,0 +1,427 @@
+shows current statements for active sessions
+select   p.username   pu , s.username su, s.status  stat, s.sid  ssid,   s.serial# sser ,  substr(p.spid,1,8)   spid, substr(sa.sql_text,1,2000) txt
+from     v$process p ,  v$session s,  v$sqlarea sa where    p.addr = s.paddr and  s.username  is not null and s.sql_address = sa.address(+)  and  s.sql_hash_value = sa.hash_value(+)
+and      s.status   = 'ACTIVE' order by 1,2,7 ;
+ 
+The gadget spec URL could not be found
+Show SESSION login history
+select c.username,a.SAMPLE_TIME, a.SQL_OPNAME, a.SQL_EXEC_START, a.program, a.module, a.machine, b.SQL_TEXT
+from DBA_HIST_ACTIVE_SESS_HISTORY a, dba_hist_sqltext b, dba_users c
+where a.SQL_ID = b.SQL_ID(+)
+and a.user_id=c.user_id
+and c.username='&username'
+order by a.SQL_EXEC_START asc;
+Find bind variable values used by SQL's
+
+select s.sid,
+s.username,
+sq.sql_text,
+s.sql_hash_value,
+s.sql_id,
+s.sql_child_number,
+spc.name,
+spc.value_string,
+last_captured
+from v$sql_bind_capture spc, v$session s,v$sql sq
+where s.sql_hash_value = spc.hash_value
+and s.sql_address = spc.address
+and sq.sql_id=s.sql_id
+and spc.was_captured='YES'
+and s.type<>'BACKGROUND'
+and s.status='ACTIVE';
+
+Identifies Segments That Are Getting Close to Running Out Of Contiguous  Free Space
+
+ select owner, s.tablespace_name, segment_name, s.bytes, next_extent, max(f.bytes) largest 
+from dba_segments s, dba_free_space f 
+where s.tablespace_name = f.tablespace_name(+) group by owner, s.tablespace_name, segment_name, s.bytes, next_extent 
+having next_extent*2 >max(f.bytes);
+
+How to check if oracle instance is leaking memory
+Use session statistics (to measure)
+
+The Oracle server maintains statistics that record the PGA and UGA memory consumption on a per session basis. If you suspect a memory leak then use SQL similar to that presented below to verify the amount of memory in use and re-issue it several times and monitor to confirm that memory is indeed growing.
+
+Select sid, substr(name,1,30), value , value/(1024*1024) "MB"
+from v$statname a, v$sesstat b
+where a.statistic# = b.statistic#
+and name like '%a memory'
+order by sid, name;
+
+select b.sid, substr(name,1,30), value , value/(1024*1024) "MB", c.serial#,c.status,c.username,c.schemaname,
+c.osuser,c.machine,c.terminal,c.program,
+c.module,state,logon_time 
+from v$statname a, v$sesstat b,v$session c 
+where a.statistic# = b.statistic# 
+and name like '%a memory' 
+and b.sid=c.sid 
+and osuser!='oracle' 
+order by status,MB desc,sid, name; 
+
+The gadget spec URL could not be found
+If you want to the SQL also join v$sqlarea table- 
+This will give you how much memory is utilized by package/procedure and a simple/complex 
+SQL text 
+
+select b.sid, substr(name,1,30), value , value/(1024*1024) "MB", s.serial#,s.sid ssid, s.status,s.username,s.schemaname,
+s.osuser,s.machine,s.terminal,s.program,
+s.module,state,logon_time,substr(p.spid,1,8) spid, substr(sa.sql_text,1,2000) txt 
+from v$statname a, v$sesstat b,v$session s, 
+v$process p ,v$sqlarea sa 
+where a.statistic# = b.statistic# 
+and name like '%a memory' 
+and b.sid=s.sid 
+and osuser!='oracle' 
+and p.addr = s.paddr 
+and s.sql_address = sa.address(+) 
+and s.sql_hash_value = sa.hash_value(+) 
+order by status,MB desc,sid, name; 
+
+FIND LOCKED TABLES AND KILL SESSION LOCKING TABLES
+
+select oracle_username || ' (' || s.osuser || ')' username , s.sid || ',' || s.serial# sess_id  ,  owner || '.' || object_name object ,  object_type ,decode( l.block ,0, 'Not Blocking',1, 'Blocking', 2, 'Global') status , decode(v.locked_mode,0, 'None' , 1, 'Null' ,2, 'Row-S (SS)'  , 3, 'Row-X (SX)' , 4, 'Share',5, 'S/Row-X (SSX)' , 6, 'Exclusive', TO_CHAR(lmode)) mode_held  
+from       v$locked_object v   ,  dba_objects d   ,  v$lock l   ,  v$session s  
+where      v.object_id = d.object_id  
+and        v.object_id = l.id1  
+and        v.session_id = s.sid  
+and OBJECT_name  in ( 'TQUEUEDSANTERAINCCDR','TQUEUEDSANTERACDR')
+order by oracle_username   ,  session_id ;
+
+select   p.username   pu , s.username su, s.status  stat, s.sid  ssid,   s.serial# sser ,  substr(p.spid,1,8)   spid, substr(sa.sql_text,1,2000) txt
+from     v$process p ,  v$session s,  v$sqlarea sa where    p.addr = s.paddr and  s.username  is not null and s.sql_address = sa.address(+)  and  s.sql_hash_value = sa.hash_value(+)
+and s.sid in (select s.sid ifrom
+from       v$locked_object v   ,  dba_objects d   ,  v$lock l   ,  v$session s  
+where      v.object_id = d.object_id  
+and        v.object_id = l.id1  
+and        v.session_id = s.sid  
+and OBJECT_name  in ( 'TQUEUEDSANTERAINCCDR','TQUEUEDSANTERACDR')
+)
+ order by 1,2,7  ;
+The gadget spec URL could not be found
+Shows waiting sessions and the events they await
+
+ select  sw.sid  sid, p.spid  spid, s.username username
+, s.osuser   osuser, sw.event event, s.machine  machine
+, s.program  program, decode(sw.event,'db file sequential read', sw.p3, 'db file scattered read', sw.p3, null) blocks
+from    v$session_wait sw,v$session  s, v$process p
+where   s.paddr = p.addr
+and     event     not in ('pipe get','client message')
+and     sw.sid  = s.sid
+
+ 
+
+Identify which object is being waited for: 
+
+SELECT kglnaown "Owner", kglnaobj "Object" 
+     FROM x$kglob WHERE kglhdadr='value of p1raw'
+
+ 
+
+Who is pinning the object? 
+  SELECT s.sid, s.serial#, s.username, s.osuser, s.machine, s.status, 
+kglpnmod "Mode", kglpnreq "Req"
+    FROM x$kglpn p, v$session s WHERE p.kglpnuse=s.saddr AND 
+kglpnhdl='value of p1raw';
+
+
+Use the following script to generate SQL to kill off multiple sessions all waiting for the same library cache pin.
+
+  SELECT 'alter system kill session ''' || s.sid || ','  || s.serial# || ''';'
+  FROM x$kglpn p, v$session s
+  WHERE p.kglpnuse=s.saddr
+  AND kglpnhdl='value of p1raw';
+The gadget spec URL could not be found
+Tablespace and File size
+
+SELECT /*+ ordered */
+d.tablespace_name tablespace
+, d.file_name filename
+, d.bytes filesize
+, d.autoextensible autoextensible
+, d.increment_by * e.value increment_by
+, d.maxbytes maxbytes
+FROM
+sys.dba_data_files d
+, v$datafile v
+, (SELECT value
+FROM v$parameter 
+WHERE name = 'db_block_size') e
+WHERE
+(d.file_name = v.name)
+UNION
+SELECT
+d.tablespace_name tablespace 
+, d.file_name filename
+, d.bytes filesize
+, d.autoextensible autoextensible
+, d.increment_by * e.value increment_by
+, d.maxbytes maxbytes
+FROM
+sys.dba_temp_files d
+, (SELECT value
+FROM v$parameter 
+WHERE name = 'db_block_size') e
+UNION
+SELECT
+'[ ONLINE REDO LOG ]'
+, a.member
+, b.bytes
+, null
+, TO_NUMBER(null)
+, TO_NUMBER(null)
+FROM
+v$logfile a
+, v$log b
+WHERE
+a.group# = b.group#
+UNION
+SELECT
+'[ CONTROL FILE ]'
+, a.name
+, TO_NUMBER(null)
+, null
+, TO_NUMBER(null)
+, TO_NUMBER(null)
+FROM
+v$controlfile a
+ORDER BY 1,2;
+FIND LOCKED SESSIONS
+set lines 100 pages 999 
+col username format a20 
+col sess_id format a10 
+col object format a25 
+col mode_held format a10 
+
+select oracle_username || ' (' || s.osuser || ')' username 
+, s.sid || ',' || s.serial# sess_id 
+, owner || '.' || object_name object 
+, object_type 
+, decode( l.block 
+, 0, 'Not Blocking' 
+, 1, 'Blocking' 
+, 2, 'Global') status 
+, decode(v.locked_mode 
+, 0, 'None' 
+, 1, 'Null' 
+, 2, 'Row-S (SS)' 
+, 3, 'Row-X (SX)' 
+, 4, 'Share' 
+, 5, 'S/Row-X (SSX)' 
+, 6, 'Exclusive', TO_CHAR(lmode)) mode_held 
+from v$locked_object v 
+, dba_objects d 
+, v$lock l 
+, v$session s 
+where v.object_id = d.object_id 
+and v.object_id = l.id1 
+and v.session_id = s.sid 
+order by oracle_username 
+, session_id
+
+Locked Object QUERY
+
+set linesize 230
+set pages 100
+col username       format a20
+col sess_id        format a10
+col object format a45
+col mode_held      format a10
+select     oracle_username || ' (' || s.osuser || ')' username
+,  s.sid || ',' || s.serial# sess_id
+,  owner || '.' || object_name object
+,  object_type
+,  substr(p.spid,1,8)   spid
+,  decode( l.block
+,       0, 'Not Blocking'
+,       1, 'Blocking'
+,       2, 'Global') status
+,  decode(v.locked_mode
+,       0, 'None'
+,       1, 'Null'
+,       2, 'Row-S (SS)'
+,       3, 'Row-X (SX)'
+,       4, 'Share'
+,       5, 'S/Row-X (SSX)'
+,       6, 'Exclusive', TO_CHAR(lmode)) mode_held
+from       v$locked_object v
+,  dba_objects d
+,  v$lock l
+,  v$session s
+,  v$process p
+where      v.object_id = d.object_id
+and        v.object_id = l.id1
+and        v.session_id = s.sid
+and        p.addr = s.paddr
+order by oracle_username
+,  session_id
+/
+
+
+select * from (select opname, target, sofar, totalwork,units, elapsed_seconds, message from v$session_longops
+where sid = <sid> and serial# = <serialno> order by start_time desc)where rownum <=1;
+
+select s.sid, s.serial#, p.spid 
+from v$session s, v$process p 
+where s.paddr = p.addr 
+and s.sid in (select SESSION_ID from v$locked_object); 
+
+select * from (select opname, target, sofar, totalwork,units, elapsed_seconds, message from v$session_longops order by start_time desc)
+where rownum <=1;
+
+Identify Segments That Are Getting Close To Their Max-Extent Values
+
+select owner,tablespace_name,segment_name,bytes,extents,
+
+max_extents from dba_segments where extents*2 > max_extents;
+
+ Library cache wating
+
+ select sid, event, p1raw, seconds_in_wait,wait_time
+ from v$session_wait 
+ where event = 'library cache pin'
+ and state = 'WAITING';
+ 
+ SID,EVENT,P1RAW,SECONDS_IN_WAIT,WAIT_TIME
+ 4962,library cache pin,070000031733BDF8,51,0
+
+ 
+Identify which object is being waited for:  
+ SELECT kglnaown "Owner", kglnaobj "Object" 
+     FROM x$kglob WHERE kglhdadr='070000031733BDF8';
+
+ 
+
+Who is pinning the object?
+
+  SELECT s.sid, s.serial#, s.username, s.osuser, s.machine, s.status, 
+kglpnmod "Mode", kglpnreq "Req"
+    FROM x$kglpn p, v$session s WHERE p.kglpnuse=s.saddr AND 
+kglpnhdl='070000031733BDF8';
+
+ 
+
+Use the following script to generate SQL to kill off multiple sessions all waiting for the same library cache pin.
+
+  SELECT 'alter system kill session ''' || s.sid || ','  || s.serial# || ''';'
+  FROM x$kglpn p, v$session s
+  WHERE p.kglpnuse=s.saddr
+  AND kglpnhdl='070000031733BDF8'
+
+
+what sessions (and what SQL statements) are using 
+sorting resources
+select s.sid || ',' || s.serial# sid,
+s.username,
+u.tablespace,
+substr(a.sql_text, 1, (instr(a.sql_text, ' ')-1)) 
+sql_text,
+u.blocks/128 mb,
+((u.blocks/128)/(sum(f.blocks)/128))*100 pct
+from v$sort_usage u,
+v$session s,
+v$sqlarea a,
+dba_data_files f
+where s.saddr = u.session_addr
+and a.address (+) = s.sql_address
+and a.hash_value (+) = s.sql_hash_value
+and f.tablespace_name = u.tablespace
+group by
+s.sid || ',' || s.serial#,
+s.username,
+substr(a.sql_text, 1, (instr(a.sql_text, ' ')-1)),
+u.tablespace,
+u.blocks/128
+The gadget spec URL could not be found
+
+
+The gadget spec URL could not be found
+
+The gadget spec URL could not be found
+
+select oracle_username || ' (' || s.osuser || ')' username , s.sid || ',' || s.serial# sess_id  ,  owner || '.' || object_name object ,  object_type ,decode( l.block ,0, 'Not Blocking',1, 'Blocking', 2, 'Global') status , decode(v.locked_mode,0, 'None' , 1, 'Null' ,2, 'Row-S (SS)'  , 3, 'Row-X (SX)' , 4, 'Share',5, 'S/Row-X (SSX)' , 6, 'Exclusive', TO_CHAR(lmode)) mode_held   
+from       v$locked_object v   ,  dba_objects d   ,  v$lock l   ,  v$session s   
+where      v.object_id = d.object_id   
+and        v.object_id = l.id1   
+and        v.session_id = s.sid   
+order by oracle_username   ,  session_id ;
+Display database locks and latches (with tables names, etc)
+
+select s.sid, s.serial#, decode(s.process, null,decode(substr(p.username,1,1), '?',upper(s.osuser), p.username),decode(p.username, 'ORACUSR ', upper(s.osuser), s.process)) process,
+       nvl(s.username, 'SYS ('||substr(p.username,1,4)||')') username, decode(s.terminal, null, rtrim(p.terminal, chr(0)), upper(s.terminal)) terminal,decode(l.type,
+                               'TM', 'DML/DATA ENQ',   'TX', 'TRANSAC ENQ', 'UL', 'PLS USR LOCK', 'BL', 'BUF HASH TBL',  'CF', 'CONTROL FILE', 'CI', 'CROSS INST F',  'DF', 'DATA FILE   ',
+                      'CU', 'CURSOR BIND ', 'DL', 'DIRECT LOAD ',  'DM', 'MOUNT/STRTUP', 'DR', 'RECO LOCK   ',  'DX', 'DISTRIB TRAN',  'FS', 'FILE SET    ',  'IN', 'INSTANCE NUM',
+                      'FI', 'SGA OPN FILE', 'IR', 'INSTCE RECVR',  'IS', 'GET STATE   ', 'IV', 'LIBCACHE INV',  'KK', 'LOG SW KICK ', 'LS', 'LOG SWITCH  ',
+                      'MM', 'MOUNT DEF   ',  'MR', 'MEDIA RECVRY', 'PF', 'PWFILE ENQ  ',  'PR', 'PROCESS STRT', 'RT', 'REDO THREAD ',  'SC', 'SCN ENQ     ',
+                      'RW', 'ROW WAIT    ',  'SM', 'SMON LOCK   ',  'SN', 'SEQNO INSTCE', 'SQ', 'SEQNO ENQ   ',  'ST', 'SPACE TRANSC',
+                      'SV', 'SEQNO VALUE ',  'TA', 'GENERIC ENQ ', 'TD', 'DLL ENQ     ',  'TE', 'EXTEND SEG  ', 'TS', 'TEMP SEGMENT',  'TT', 'TEMP TABLE  ',
+                      'UN', 'USER NAME   ',  'WL', 'WRITE REDO  ',  'TYPE='||l.type) type, decode(l.lmode, 0, 'NONE', 1, 'NULL', 2, 'RS', 3, 'RX',
+                       4, 'S',    5, 'RSX',  6, 'X', to_char(l.lmode) ) lmode, decode(l.request, 0, 'NONE', 1, 'NULL', 2, 'RS', 3, 'RX', 4, 'S', 5, 'RSX', 6, 'X',
+                         to_char(l.request) ) lrequest,  decode(l.type, 'MR', decode(u.name, null,'DICTIONARY OBJECT', u.name||'.'||o.name),
+                      'TD', u.name||'.'||o.name,  'TM', u.name||'.'||o.name, 'RW', 'FILE#='||substr(l.id1,1,3)||   ' BLOCK#='||substr(l.id1,4,5)||' ROW='||l.id2,
+                      'TX', 'RS+SLOT#'||l.id1||' WRP#'||l.id2,  'WL', 'REDO LOG FILE#='||l.id1,  'RT', 'THREAD='||l.id1,
+                      'TS', decode(l.id2, 0, 'ENQUEUE', 'NEW BLOCK ALLOCATION'),  'ID1='||l.id1||' ID2='||l.id2) object
+from   sys.v_$lock l, sys.v_$session s, sys.obj$ o, sys.user$ u,sys.v_$process p
+where  s.paddr  = p.addr(+)
+  and  l.sid    = s.sid
+  and  l.id1    = o.obj#(+)
+  and  o.owner# = u.user#(+)
+  and  l.type   <> 'MR'
+UNION ALL  /*** LATCH HOLDERS ***/
+select s.sid, s.serial#, s.process, s.username, s.terminal,
+       'LATCH', 'X', 'NONE', h.name||' ADDR='||rawtohex(laddr)
+from   sys.v_$process p, sys.v_$session s, sys.v_$latchholder h
+where  h.pid  = p.pid
+  and  p.addr = s.paddr
+UNION ALL    /*** LATCH WAITERS ***/
+select s.sid, s.serial#, s.process, s.username, s.terminal,
+       'LATCH', 'NONE', 'X', name||' LATCH='||p.latchwait
+from   sys.v_$session s, sys.v_$process p, sys.v_$latch l
+where  latchwait is not null
+  and  p.addr      = s.paddr
+  and  p.latchwait = l.addr
+
+SQL*Plus script to display total time spent waiting info (from V$SESSION_EVENT) along with total time spent processing info (from V$SESSTAT for "CPU used by this session" statistic),
+along with a calculation of the percentage of time each session spends doing each thing.
+
+break on report on username on sid skip 1
+set pagesize 100 lines 130 trimspool on trimout on verify off recsep off
+set trimspool on trimout on
+
+undef usr
+
+col type format a5 heading "Svc,|Wait"
+col username format a12
+col sid format a30
+col name format a42
+col tot_secs_spent format 999,999,999,990.00
+col pct_total format 990.00 heading "%|Total"
+
+select	type,
+	username,	sid,	name,	tot_secs_spent,	(tot_secs_spent / (sum(tot_secs_spent) over (partition by sid)))*100 pct_total
+from	(select	'Wait' type,		nvl(s.username, 'SYS') username,		s.sid || ' (' || ltrim(s.program) || ')' sid,		e.event name,
+		e.time_waited/100 tot_secs_spent
+	 from	v$session_event			e,		v$session			s
+	 where	e.sid = s.sid
+	 and	nvl(s.username, 'SYS') = decode(upper('&&usr'), '', nvl(s.username, 'SYS'), upper('&&usr'))
+	 and	e.time_waited > 0
+	 union all
+	 select	'Svc' type,		nvl(s.username, 'SYS') username,		s.sid || ' (' || ltrim(s.program) || ')' sid,		sn.name,		ss.value/100 tot_secs_spent
+	 from	v$sesstat			ss,		v$statname			sn,		v$session			s
+	 where	ss.sid = s.sid	 and	ss.value > 0	 and	sn.statistic# = ss.statistic#	 and	sn.name = 'parse time cpu'
+	 and	nvl(s.username, 'SYS') = decode(upper('&&usr'), '', nvl(s.username, 'SYS'), upper('&&usr'))
+	 union all
+	 select	'Svc' type,		nvl(s.username, 'SYS') username,		s.sid || ' (' || ltrim(s.program) || ')' sid,		sn.name,		ss.value/100 tot_secs_spent
+	 from	v$sesstat			ss,
+		v$statname			sn,		v$session			s
+	 where	ss.sid = s.sid	 and	ss.value > 0	 and	sn.statistic# = ss.statistic#	 and	sn.name = 'recursive cpu usage'
+	 and	nvl(s.username, 'SYS') = decode(upper('&&usr'), '', nvl(s.username, 'SYS'), upper('&&usr'))
+	 union all
+	 select	'Svc' type,		nvl(s.username, 'SYS') username,		s.sid || ' (' || ltrim(s.program) || ')' sid,		'other cpu usage' name,		(sst.value - (ssp.value + ssr.value))/100 tot_secs_spent
+	 from	v$sesstat			sst,		v$statname			snt,	 	v$sesstat			ssp,		v$statname			snp,	 	v$sesstat			ssr,		v$statname			snr,		v$session			s
+	 where	sst.sid = s.sid	 and	snt.statistic# = sst.statistic#	 and	snt.name = 'CPU used by this session'	 and	ssp.sid = s.sid	 and	snp.statistic# = ssp.statistic#
+	 and	snp.name = 'parse time cpu'	 and	ssr.sid = s.sid	 and	snr.statistic# = ssr.statistic#	 and	snr.name = 'recursive cpu usage'
+	 and	nvl(s.username, 'SYS') = decode(upper('&&usr'), '', nvl(s.username, 'SYS'), upper('&&usr')))
+order by 2, 3, 6 desc, 5 desc, 4
+spool sesstime
+/
+spool off
